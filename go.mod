@@ -1,4 +1,4 @@
-module bedrock
+module github.com/Jack4Code/bedrock
 
 go 1.25.5
 
