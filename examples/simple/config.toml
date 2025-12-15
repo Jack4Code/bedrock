@@ -1,0 +1,3 @@
+http_port = "8080"
+health_port = "9090"
+log_level = "info"
