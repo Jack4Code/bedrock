@@ -31,9 +31,10 @@ type App interface {
 
 // Route represents an HTTP route
 type Route struct {
-	Method  string
-	Path    string
-	Handler Handler
+	Method     string
+	Path       string
+	Handler    Handler
+	Middleware []Middleware // Optional per-route middleware
 }
 
 func Run(app App, cfg Config) error {
@@ -89,9 +90,16 @@ func Run(app App, cfg Config) error {
 	// Register routes
 	for _, route := range routes {
 		r := route
+
+		// Apply middleware if present
+		handler := r.Handler
+		if len(r.Middleware) > 0 {
+			handler = Chain(handler, r.Middleware...)
+		}
+
 		router.HandleFunc(r.Path, func(w http.ResponseWriter, req *http.Request) {
 			ctx := req.Context()
-			response := r.Handler(ctx, req)
+			response := handler(ctx, req)
 			if err := response.Write(ctx, w); err != nil {
 				http.Error(w, "Internal Server Error", 500)
 			}
