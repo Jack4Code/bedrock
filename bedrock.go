@@ -37,7 +37,33 @@ type Route struct {
 	Middleware []Middleware // Optional per-route middleware
 }
 
+// CORSConfig holds CORS configuration
+type CORSConfig struct {
+	AllowedOrigins   []string
+	AllowedMethods   []string
+	AllowedHeaders   []string
+	ExposedHeaders   []string
+	AllowCredentials bool
+	MaxAge           int
+}
+
+// DefaultCORSConfig returns a permissive CORS config for development
+func DefaultCORSConfig() CORSConfig {
+	return CORSConfig{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
+		ExposedHeaders:   []string{"Link"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}
+}
+
 func Run(app App, cfg Config) error {
+	return RunWithCORS(app, cfg, DefaultCORSConfig())
+}
+
+func RunWithCORS(app App, cfg Config, corsConfig CORSConfig) error {
 	ctx := context.Background()
 
 	// Create health status tracker
@@ -97,6 +123,7 @@ func Run(app App, cfg Config) error {
 			handler = Chain(handler, r.Middleware...)
 		}
 
+		// Register the route
 		router.HandleFunc(r.Path, func(w http.ResponseWriter, req *http.Request) {
 			ctx := req.Context()
 			response := handler(ctx, req)
@@ -104,11 +131,20 @@ func Run(app App, cfg Config) error {
 				http.Error(w, "Internal Server Error", 500)
 			}
 		}).Methods(r.Method)
+
+		// Also register OPTIONS for preflight (CORS)
+		router.HandleFunc(r.Path, func(w http.ResponseWriter, req *http.Request) {
+			// Preflight requests just return 200 OK with CORS headers
+			w.WriteHeader(http.StatusOK)
+		}).Methods("OPTIONS")
 	}
+
+	// Wrap router with CORS middleware
+	corsHandler := corsMiddleware(corsConfig)(router)
 
 	server := &http.Server{
 		Addr:    ":" + cfg.HTTPPort,
-		Handler: router,
+		Handler: corsHandler,
 	}
 
 	// Start main server
@@ -153,6 +189,75 @@ func Run(app App, cfg Config) error {
 
 	log.Println("Servers stopped")
 	return nil
+}
+
+// corsMiddleware wraps an http.Handler with CORS headers
+func corsMiddleware(cfg CORSConfig) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+
+			// Check if origin is allowed
+			allowed := false
+			for _, allowedOrigin := range cfg.AllowedOrigins {
+				if allowedOrigin == "*" || allowedOrigin == origin {
+					allowed = true
+					if allowedOrigin == "*" {
+						origin = "*"
+					}
+					break
+				}
+			}
+
+			if allowed {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+			}
+
+			// Set other CORS headers
+			if len(cfg.AllowedMethods) > 0 {
+				methods := ""
+				for i, method := range cfg.AllowedMethods {
+					if i > 0 {
+						methods += ", "
+					}
+					methods += method
+				}
+				w.Header().Set("Access-Control-Allow-Methods", methods)
+			}
+
+			if len(cfg.AllowedHeaders) > 0 {
+				headers := ""
+				for i, header := range cfg.AllowedHeaders {
+					if i > 0 {
+						headers += ", "
+					}
+					headers += header
+				}
+				w.Header().Set("Access-Control-Allow-Headers", headers)
+			}
+
+			if len(cfg.ExposedHeaders) > 0 {
+				headers := ""
+				for i, header := range cfg.ExposedHeaders {
+					if i > 0 {
+						headers += ", "
+					}
+					headers += header
+				}
+				w.Header().Set("Access-Control-Expose-Headers", headers)
+			}
+
+			if cfg.AllowCredentials {
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
+
+			if cfg.MaxAge > 0 {
+				w.Header().Set("Access-Control-Max-Age", fmt.Sprintf("%d", cfg.MaxAge))
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // --- Request Helpers
