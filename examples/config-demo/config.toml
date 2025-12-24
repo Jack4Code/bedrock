@@ -1,0 +1,17 @@
+# Example Application Configuration
+# This demonstrates how to structure your config.toml file
+# when using bedrock's config package
+
+# Application-specific configuration (top-level)
+database_url = "postgres://localhost:5432/myapp"
+max_connections = 50
+api_key = "demo-api-key-12345678"
+cache_ttl = 3600
+
+# Bedrock framework configuration
+[bedrock]
+http_port = 8080
+health_port = 9090
+metrics_port = 9091
+log_level = "info"
+environment = "development"
