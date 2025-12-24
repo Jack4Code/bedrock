@@ -12,9 +12,10 @@ import (
 // BaseConfig contains bedrock's core configuration needs.
 // Applications can embed this in their own config structs to inherit bedrock's settings.
 type BaseConfig struct {
-	LogLevel    string `toml:"log_level" env:"LOG_LEVEL"`
-	MetricsPort int    `toml:"metrics_port" env:"METRICS_PORT"`
+	HTTPPort    int    `toml:"http_port" env:"HTTP_PORT"`
 	HealthPort  int    `toml:"health_port" env:"HEALTH_PORT"`
+	MetricsPort int    `toml:"metrics_port" env:"METRICS_PORT"`
+	LogLevel    string `toml:"log_level" env:"LOG_LEVEL"`
 	Environment string `toml:"environment" env:"ENVIRONMENT"`
 }
 

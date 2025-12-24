@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 
 	"bedrock"
+	"github.com/Jack4Code/bedrock/config"
 )
 
 type SimpleApp struct{}
@@ -102,7 +104,14 @@ func (a *SimpleApp) uploadDocumentHandler(ctx context.Context, r *http.Request) 
 
 func main() {
 	app := &SimpleApp{}
-	cfg := bedrock.LoadConfig()
+
+	// Load configuration
+	loader := config.NewLoader("config.toml")
+	var cfg config.BaseConfig
+	if err := loader.Load(&cfg); err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
 	if err := bedrock.Run(app, cfg); err != nil {
 		fmt.Printf("Error: %v\n", err)
 	}

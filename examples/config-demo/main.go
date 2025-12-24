@@ -45,9 +45,10 @@ func main() {
 
 	// Display the loaded configuration
 	fmt.Println("Bedrock Configuration:")
-	fmt.Printf("  Log Level:    %s\n", cfg.Bedrock.LogLevel)
-	fmt.Printf("  Metrics Port: %d\n", cfg.Bedrock.MetricsPort)
+	fmt.Printf("  HTTP Port:    %d\n", cfg.Bedrock.HTTPPort)
 	fmt.Printf("  Health Port:  %d\n", cfg.Bedrock.HealthPort)
+	fmt.Printf("  Metrics Port: %d\n", cfg.Bedrock.MetricsPort)
+	fmt.Printf("  Log Level:    %s\n", cfg.Bedrock.LogLevel)
 	fmt.Printf("  Environment:  %s\n", cfg.Bedrock.Environment)
 	fmt.Println()
 
@@ -59,9 +60,10 @@ func main() {
 	fmt.Println()
 
 	fmt.Println("Environment Variable Overrides:")
-	checkEnvOverride("LOG_LEVEL")
-	checkEnvOverride("METRICS_PORT")
+	checkEnvOverride("HTTP_PORT")
 	checkEnvOverride("HEALTH_PORT")
+	checkEnvOverride("METRICS_PORT")
+	checkEnvOverride("LOG_LEVEL")
 	checkEnvOverride("ENVIRONMENT")
 	checkEnvOverride("DATABASE_URL")
 	checkEnvOverride("MAX_CONNECTIONS")

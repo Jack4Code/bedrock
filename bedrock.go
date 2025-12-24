@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/Jack4Code/bedrock/config"
 	"github.com/gorilla/mux"
 )
 
@@ -59,11 +61,11 @@ func DefaultCORSConfig() CORSConfig {
 	}
 }
 
-func Run(app App, cfg Config) error {
+func Run(app App, cfg config.BaseConfig) error {
 	return RunWithCORS(app, cfg, DefaultCORSConfig())
 }
 
-func RunWithCORS(app App, cfg Config, corsConfig CORSConfig) error {
+func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 	ctx := context.Background()
 
 	// Create health status tracker
@@ -71,7 +73,7 @@ func RunWithCORS(app App, cfg Config, corsConfig CORSConfig) error {
 
 	// Start health server BEFORE calling OnStart
 	// This way Nomad/K8s can see the container is alive
-	healthServer := startHealthServer(cfg.HealthPort, healthStatus)
+	healthServer := startHealthServer(strconv.Itoa(cfg.HealthPort), healthStatus)
 
 	// Call app.OnStart()
 	if err := app.OnStart(ctx); err != nil {
@@ -143,13 +145,13 @@ func RunWithCORS(app App, cfg Config, corsConfig CORSConfig) error {
 	corsHandler := corsMiddleware(corsConfig)(router)
 
 	server := &http.Server{
-		Addr:    ":" + cfg.HTTPPort,
+		Addr:    ":" + strconv.Itoa(cfg.HTTPPort),
 		Handler: corsHandler,
 	}
 
 	// Start main server
 	go func() {
-		log.Printf("Starting server on :%s", cfg.HTTPPort)
+		log.Printf("Starting server on :%d", cfg.HTTPPort)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("Server error: %v", err)
 		}

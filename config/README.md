@@ -17,9 +17,10 @@ The `BaseConfig` struct provides bedrock's core configuration needs:
 
 ```go
 type BaseConfig struct {
-    LogLevel    string `toml:"log_level" env:"LOG_LEVEL"`
-    MetricsPort int    `toml:"metrics_port" env:"METRICS_PORT"`
+    HTTPPort    int    `toml:"http_port" env:"HTTP_PORT"`
     HealthPort  int    `toml:"health_port" env:"HEALTH_PORT"`
+    MetricsPort int    `toml:"metrics_port" env:"METRICS_PORT"`
+    LogLevel    string `toml:"log_level" env:"LOG_LEVEL"`
     Environment string `toml:"environment" env:"ENVIRONMENT"`
 }
 ```
@@ -77,9 +78,10 @@ api_key = "your-api-key"
 
 # Bedrock configuration
 [bedrock]
+http_port = 8080
+health_port = 9090
+metrics_port = 9091
 log_level = "info"
-metrics_port = 9090
-health_port = 8080
 environment = "production"
 ```
 
@@ -142,9 +144,10 @@ func main() {
 With this TOML file:
 
 ```toml
+http_port = 8080
+health_port = 9090
+metrics_port = 9091
 log_level = "info"
-metrics_port = 9090
-health_port = 8080
 environment = "production"
 ```
 
