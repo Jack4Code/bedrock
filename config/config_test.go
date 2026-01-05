@@ -294,3 +294,221 @@ func TestEnvOverrideWithoutTOMLFile(t *testing.T) {
 		t.Errorf("expected Environment to be 'test' (from env), got %s", config.Environment)
 	}
 }
+
+// TestNomadPortResolution tests that Nomad-assigned ports take precedence
+func TestNomadPortResolution(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	tomlContent := `
+http_port = 8080
+health_port = 8081
+metrics_port = 8082
+`
+
+	if err := os.WriteFile(configPath, []byte(tomlContent), 0644); err != nil {
+		t.Fatalf("failed to write test config file: %v", err)
+	}
+
+	// Set Nomad environment variables
+	os.Setenv("NOMAD_PORT_http", "12345")
+	os.Setenv("NOMAD_PORT_health", "12346")
+	os.Setenv("NOMAD_PORT_metrics", "12347")
+	defer func() {
+		os.Unsetenv("NOMAD_PORT_http")
+		os.Unsetenv("NOMAD_PORT_health")
+		os.Unsetenv("NOMAD_PORT_metrics")
+	}()
+
+	loader := NewLoader(configPath)
+	var config BaseConfig
+	if err := loader.Load(&config); err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	// Config should have TOML values
+	if config.HTTPPort != 8080 {
+		t.Errorf("expected HTTPPort to be 8080, got %d", config.HTTPPort)
+	}
+	if config.HealthPort != 8081 {
+		t.Errorf("expected HealthPort to be 8081, got %d", config.HealthPort)
+	}
+	if config.MetricsPort != 8082 {
+		t.Errorf("expected MetricsPort to be 8082, got %d", config.MetricsPort)
+	}
+
+	// But GetXXXPort() should return Nomad values
+	if config.GetHTTPPort() != 12345 {
+		t.Errorf("expected GetHTTPPort() to return 12345 (from Nomad), got %d", config.GetHTTPPort())
+	}
+	if config.GetHealthPort() != 12346 {
+		t.Errorf("expected GetHealthPort() to return 12346 (from Nomad), got %d", config.GetHealthPort())
+	}
+	if config.GetMetricsPort() != 12347 {
+		t.Errorf("expected GetMetricsPort() to return 12347 (from Nomad), got %d", config.GetMetricsPort())
+	}
+}
+
+// TestNomadPortFallback tests fallback to config when Nomad vars aren't set
+func TestNomadPortFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	tomlContent := `
+http_port = 9090
+health_port = 9091
+metrics_port = 9092
+`
+
+	if err := os.WriteFile(configPath, []byte(tomlContent), 0644); err != nil {
+		t.Fatalf("failed to write test config file: %v", err)
+	}
+
+	// Ensure no Nomad env vars are set
+	os.Unsetenv("NOMAD_PORT_http")
+	os.Unsetenv("NOMAD_PORT_health")
+	os.Unsetenv("NOMAD_PORT_metrics")
+
+	loader := NewLoader(configPath)
+	var config BaseConfig
+	if err := loader.Load(&config); err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	// GetXXXPort() should return config values when no Nomad vars
+	if config.GetHTTPPort() != 9090 {
+		t.Errorf("expected GetHTTPPort() to return 9090 (from config), got %d", config.GetHTTPPort())
+	}
+	if config.GetHealthPort() != 9091 {
+		t.Errorf("expected GetHealthPort() to return 9091 (from config), got %d", config.GetHealthPort())
+	}
+	if config.GetMetricsPort() != 9092 {
+		t.Errorf("expected GetMetricsPort() to return 9092 (from config), got %d", config.GetMetricsPort())
+	}
+}
+
+// TestNomadPortInvalid tests graceful handling of invalid Nomad port values
+func TestNomadPortInvalid(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	tomlContent := `
+http_port = 7070
+health_port = 7071
+metrics_port = 7072
+`
+
+	if err := os.WriteFile(configPath, []byte(tomlContent), 0644); err != nil {
+		t.Fatalf("failed to write test config file: %v", err)
+	}
+
+	// Set invalid Nomad environment variables
+	os.Setenv("NOMAD_PORT_http", "not_a_number")
+	os.Setenv("NOMAD_PORT_health", "invalid")
+	os.Setenv("NOMAD_PORT_metrics", "12.34")
+	defer func() {
+		os.Unsetenv("NOMAD_PORT_http")
+		os.Unsetenv("NOMAD_PORT_health")
+		os.Unsetenv("NOMAD_PORT_metrics")
+	}()
+
+	loader := NewLoader(configPath)
+	var config BaseConfig
+	if err := loader.Load(&config); err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	// GetXXXPort() should fall back to config values when Nomad vars are invalid
+	if config.GetHTTPPort() != 7070 {
+		t.Errorf("expected GetHTTPPort() to return 7070 (fallback), got %d", config.GetHTTPPort())
+	}
+	if config.GetHealthPort() != 7071 {
+		t.Errorf("expected GetHealthPort() to return 7071 (fallback), got %d", config.GetHealthPort())
+	}
+	if config.GetMetricsPort() != 7072 {
+		t.Errorf("expected GetMetricsPort() to return 7072 (fallback), got %d", config.GetMetricsPort())
+	}
+}
+
+// TestNomadPortPartialSet tests when only some Nomad ports are set
+func TestNomadPortPartialSet(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	tomlContent := `
+http_port = 6060
+health_port = 6061
+metrics_port = 6062
+`
+
+	if err := os.WriteFile(configPath, []byte(tomlContent), 0644); err != nil {
+		t.Fatalf("failed to write test config file: %v", err)
+	}
+
+	// Set only HTTP port via Nomad
+	os.Setenv("NOMAD_PORT_http", "23456")
+	defer os.Unsetenv("NOMAD_PORT_http")
+
+	// Ensure other Nomad vars are not set
+	os.Unsetenv("NOMAD_PORT_health")
+	os.Unsetenv("NOMAD_PORT_metrics")
+
+	loader := NewLoader(configPath)
+	var config BaseConfig
+	if err := loader.Load(&config); err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	// HTTP should use Nomad value
+	if config.GetHTTPPort() != 23456 {
+		t.Errorf("expected GetHTTPPort() to return 23456 (from Nomad), got %d", config.GetHTTPPort())
+	}
+
+	// Health and Metrics should use config values
+	if config.GetHealthPort() != 6061 {
+		t.Errorf("expected GetHealthPort() to return 6061 (from config), got %d", config.GetHealthPort())
+	}
+	if config.GetMetricsPort() != 6062 {
+		t.Errorf("expected GetMetricsPort() to return 6062 (from config), got %d", config.GetMetricsPort())
+	}
+}
+
+// TestNomadWithEnvOverrides tests interaction between Nomad ports and env overrides
+func TestNomadWithEnvOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	tomlContent := `
+http_port = 5050
+health_port = 5051
+metrics_port = 5052
+`
+
+	if err := os.WriteFile(configPath, []byte(tomlContent), 0644); err != nil {
+		t.Fatalf("failed to write test config file: %v", err)
+	}
+
+	// Set both regular env overrides and Nomad ports
+	os.Setenv("HTTP_PORT", "4040")
+	os.Setenv("NOMAD_PORT_http", "34567")
+	defer func() {
+		os.Unsetenv("HTTP_PORT")
+		os.Unsetenv("NOMAD_PORT_http")
+	}()
+
+	loader := NewLoader(configPath)
+	var config BaseConfig
+	if err := loader.Load(&config); err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	// HTTPPort field should have env override value
+	if config.HTTPPort != 4040 {
+		t.Errorf("expected HTTPPort to be 4040 (from HTTP_PORT env), got %d", config.HTTPPort)
+	}
+
+	// But GetHTTPPort() should return Nomad value (Nomad takes precedence)
+	if config.GetHTTPPort() != 34567 {
+		t.Errorf("expected GetHTTPPort() to return 34567 (from Nomad), got %d", config.GetHTTPPort())
+	}
+}

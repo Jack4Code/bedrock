@@ -52,6 +52,28 @@ func main() {
 	fmt.Printf("  Environment:  %s\n", cfg.Bedrock.Environment)
 	fmt.Println()
 
+	// Display Nomad-aware port resolution
+	fmt.Println("Resolved Ports (Nomad-aware):")
+	fmt.Printf("  HTTP Port:    %d", cfg.Bedrock.GetHTTPPort())
+	if os.Getenv("NOMAD_PORT_http") != "" {
+		fmt.Printf(" (from NOMAD_PORT_http)\n")
+	} else {
+		fmt.Printf(" (from config)\n")
+	}
+	fmt.Printf("  Health Port:  %d", cfg.Bedrock.GetHealthPort())
+	if os.Getenv("NOMAD_PORT_health") != "" {
+		fmt.Printf(" (from NOMAD_PORT_health)\n")
+	} else {
+		fmt.Printf(" (from config)\n")
+	}
+	fmt.Printf("  Metrics Port: %d", cfg.Bedrock.GetMetricsPort())
+	if os.Getenv("NOMAD_PORT_metrics") != "" {
+		fmt.Printf(" (from NOMAD_PORT_metrics)\n")
+	} else {
+		fmt.Printf(" (from config)\n")
+	}
+	fmt.Println()
+
 	fmt.Println("Application Configuration:")
 	fmt.Printf("  Database URL:    %s\n", cfg.DatabaseURL)
 	fmt.Printf("  Max Connections: %d\n", cfg.MaxConnections)
@@ -69,6 +91,12 @@ func main() {
 	checkEnvOverride("MAX_CONNECTIONS")
 	checkEnvOverride("API_KEY")
 	checkEnvOverride("CACHE_TTL")
+	fmt.Println()
+
+	fmt.Println("Nomad Dynamic Port Allocation:")
+	checkEnvOverride("NOMAD_PORT_http")
+	checkEnvOverride("NOMAD_PORT_health")
+	checkEnvOverride("NOMAD_PORT_metrics")
 	fmt.Println()
 
 	fmt.Println("✓ Configuration loaded successfully!")

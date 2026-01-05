@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"reflect"
 	"strconv"
@@ -17,6 +18,50 @@ type BaseConfig struct {
 	MetricsPort int    `toml:"metrics_port" env:"METRICS_PORT"`
 	LogLevel    string `toml:"log_level" env:"LOG_LEVEL"`
 	Environment string `toml:"environment" env:"ENVIRONMENT"`
+}
+
+// GetHTTPPort returns the HTTP port to use, checking Nomad dynamic port allocation first.
+// If NOMAD_PORT_http is set and valid, it returns that value.
+// Otherwise, it falls back to the configured HTTPPort value.
+func (b *BaseConfig) GetHTTPPort() int {
+	return resolvePort("http", b.HTTPPort)
+}
+
+// GetHealthPort returns the health port to use, checking Nomad dynamic port allocation first.
+// If NOMAD_PORT_health is set and valid, it returns that value.
+// Otherwise, it falls back to the configured HealthPort value.
+func (b *BaseConfig) GetHealthPort() int {
+	return resolvePort("health", b.HealthPort)
+}
+
+// GetMetricsPort returns the metrics port to use, checking Nomad dynamic port allocation first.
+// If NOMAD_PORT_metrics is set and valid, it returns that value.
+// Otherwise, it falls back to the configured MetricsPort value.
+func (b *BaseConfig) GetMetricsPort() int {
+	return resolvePort("metrics", b.MetricsPort)
+}
+
+// resolvePort checks for Nomad dynamic port allocation and falls back to configured value.
+// label is the port label (e.g., "http", "health", "metrics")
+// fallback is the value from the config to use if Nomad env var is not set
+func resolvePort(label string, fallback int) int {
+	envVar := "NOMAD_PORT_" + label
+	nomadPort := os.Getenv(envVar)
+
+	if nomadPort == "" {
+		// No Nomad env var, use config value
+		return fallback
+	}
+
+	// Parse Nomad port
+	port, err := strconv.Atoi(nomadPort)
+	if err != nil {
+		log.Printf("Warning: %s is set but invalid (%q), falling back to configured port %d", envVar, nomadPort, fallback)
+		return fallback
+	}
+
+	log.Printf("Using Nomad-assigned %s port: %d", label, port)
+	return port
 }
 
 // Loader handles loading configuration from TOML files and environment variables.
