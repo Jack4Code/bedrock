@@ -45,11 +45,9 @@ func (h *HealthStatus) IsReady() bool {
 	return h.ready
 }
 
-func startHealthServer(port string, status *HealthStatus) *http.Server {
-	mux := http.NewServeMux()
-
-	// Health check - is the app alive?
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+// healthCheckHandler returns an http.HandlerFunc for the /health endpoint
+func healthCheckHandler(status *HealthStatus) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if status.IsHealthy() {
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
@@ -57,10 +55,12 @@ func startHealthServer(port string, status *HealthStatus) *http.Server {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy"})
 		}
-	})
+	}
+}
 
-	// Ready check - is the app ready to serve traffic?
-	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+// readyCheckHandler returns an http.HandlerFunc for the /ready endpoint
+func readyCheckHandler(status *HealthStatus) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if status.IsReady() {
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
@@ -68,7 +68,21 @@ func startHealthServer(port string, status *HealthStatus) *http.Server {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			json.NewEncoder(w).Encode(map[string]string{"status": "not ready"})
 		}
-	})
+	}
+}
+
+// liveCheckHandler returns an http.HandlerFunc for the /live endpoint (alias for health)
+func liveCheckHandler(status *HealthStatus) http.HandlerFunc {
+	return healthCheckHandler(status)
+}
+
+func startHealthServer(port string, status *HealthStatus) *http.Server {
+	mux := http.NewServeMux()
+
+	// Register health endpoints
+	mux.HandleFunc("/health", healthCheckHandler(status))
+	mux.HandleFunc("/ready", readyCheckHandler(status))
+	mux.HandleFunc("/live", liveCheckHandler(status))
 
 	server := &http.Server{
 		Addr:    ":" + port,

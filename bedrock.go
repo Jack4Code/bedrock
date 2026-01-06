@@ -71,9 +71,19 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 	// Create health status tracker
 	healthStatus := newHealthStatus()
 
-	// Start health server BEFORE calling OnStart
-	// This way Nomad/K8s can see the container is alive
-	healthServer := startHealthServer(strconv.Itoa(cfg.HealthPort), healthStatus)
+	// Determine if we should merge health endpoints into main server
+	// This happens when HTTP and Health ports are the same
+	mergeServers := cfg.HTTPPort == cfg.HealthPort
+
+	// Only start separate health server if ports differ
+	var healthServer *http.Server
+	if !mergeServers {
+		// Start health server BEFORE calling OnStart
+		// This way Nomad/K8s can see the container is alive
+		healthServer = startHealthServer(strconv.Itoa(cfg.HealthPort), healthStatus)
+	} else {
+		log.Printf("Health endpoints will be merged into main server on port %d", cfg.HTTPPort)
+	}
 
 	// Call app.OnStart()
 	if err := app.OnStart(ctx); err != nil {
@@ -85,8 +95,68 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 
 	routes := app.Routes()
 
+	// Validate routes don't conflict with reserved health endpoints when merging
+	if mergeServers {
+		reservedPaths := []string{"/health", "/ready", "/live"}
+		for _, route := range routes {
+			for _, reserved := range reservedPaths {
+				if route.Path == reserved {
+					return fmt.Errorf("route conflict: application route %s conflicts with reserved health endpoint %s", route.Path, reserved)
+				}
+			}
+		}
+	}
+
 	if len(routes) == 0 {
-		// No HTTP routes, but health server is running
+		// No HTTP routes, running in background mode
+		if mergeServers {
+			// When merging servers but no app routes exist, we still need to start
+			// a server for the health endpoints
+			log.Println("No HTTP routes, starting server for health endpoints only")
+
+			router := mux.NewRouter()
+
+			// Register health endpoints (no CORS needed for health checks)
+			router.HandleFunc("/health", healthCheckHandler(healthStatus))
+			router.HandleFunc("/ready", readyCheckHandler(healthStatus))
+			router.HandleFunc("/live", liveCheckHandler(healthStatus))
+
+			server := &http.Server{
+				Addr:    ":" + strconv.Itoa(cfg.HTTPPort),
+				Handler: router,
+			}
+
+			go func() {
+				log.Printf("Starting health-only server on :%d", cfg.HTTPPort)
+				if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Printf("Server error: %v", err)
+				}
+			}()
+
+			// Mark as ready
+			healthStatus.SetReady(true)
+
+			// Wait for shutdown signal
+			quit := make(chan os.Signal, 1)
+			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+			<-quit
+
+			log.Println("Shutting down...")
+
+			// Shutdown server
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			server.Shutdown(shutdownCtx)
+
+			// Call app.OnStop()
+			if err := app.OnStop(ctx); err != nil {
+				log.Printf("Error during OnStop: %v", err)
+			}
+
+			return nil
+		}
+
+		// Separate health server is already running
 		log.Println("No HTTP routes, running in background mode")
 
 		// Mark as ready (no HTTP server to wait for)
@@ -115,7 +185,16 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 	// Create main HTTP server
 	router := mux.NewRouter()
 
-	// Register routes
+	// If merging servers, add health endpoints to main router BEFORE app routes
+	// Health endpoints should NOT have CORS or app middleware applied
+	if mergeServers {
+		router.HandleFunc("/health", healthCheckHandler(healthStatus))
+		router.HandleFunc("/ready", readyCheckHandler(healthStatus))
+		router.HandleFunc("/live", liveCheckHandler(healthStatus))
+		log.Printf("Health endpoints (/health, /ready, /live) registered on main router")
+	}
+
+	// Register app routes
 	for _, route := range routes {
 		r := route
 
@@ -142,6 +221,8 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 	}
 
 	// Wrap router with CORS middleware
+	// Note: Health endpoints are registered before CORS, so they won't have CORS applied
+	// This is correct - health checks are infrastructure endpoints
 	corsHandler := corsMiddleware(corsConfig)(router)
 
 	server := &http.Server{
@@ -179,9 +260,11 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 		log.Printf("Main server forced to shutdown: %v", err)
 	}
 
-	// Shutdown health server
-	if err := healthServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Health server forced to shutdown: %v", err)
+	// Shutdown health server only if it's separate
+	if !mergeServers {
+		if err := healthServer.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Health server forced to shutdown: %v", err)
+		}
 	}
 
 	// Call app.OnStop()
