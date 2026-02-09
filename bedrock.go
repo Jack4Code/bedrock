@@ -37,6 +37,7 @@ type Route struct {
 	Path       string
 	Handler    Handler
 	Middleware []Middleware // Optional per-route middleware
+	IsPrefix   bool        // If true, matches all paths with this prefix
 }
 
 // CORSConfig holds CORS configuration
@@ -205,19 +206,25 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 		}
 
 		// Register the route
-		router.HandleFunc(r.Path, func(w http.ResponseWriter, req *http.Request) {
+		handlerFunc := func(w http.ResponseWriter, req *http.Request) {
 			ctx := req.Context()
 			response := handler(ctx, req)
 			if err := response.Write(ctx, w); err != nil {
 				http.Error(w, "Internal Server Error", 500)
 			}
-		}).Methods(r.Method)
-
-		// Also register OPTIONS for preflight (CORS)
-		router.HandleFunc(r.Path, func(w http.ResponseWriter, req *http.Request) {
+		}
+		optionsFunc := func(w http.ResponseWriter, req *http.Request) {
 			// Preflight requests just return 200 OK with CORS headers
 			w.WriteHeader(http.StatusOK)
-		}).Methods("OPTIONS")
+		}
+
+		if r.IsPrefix {
+			router.PathPrefix(r.Path).HandlerFunc(handlerFunc).Methods(r.Method)
+			router.PathPrefix(r.Path).HandlerFunc(optionsFunc).Methods("OPTIONS")
+		} else {
+			router.HandleFunc(r.Path, handlerFunc).Methods(r.Method)
+			router.HandleFunc(r.Path, optionsFunc).Methods("OPTIONS")
+		}
 	}
 
 	// Wrap router with CORS middleware
