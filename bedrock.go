@@ -72,6 +72,16 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 	// Create health status tracker
 	healthStatus := newHealthStatus()
 
+	// Start cron jobs if the app provides them
+	var jobs *jobRunner
+	if jp, ok := app.(JobsProvider); ok {
+		var err error
+		jobs, err = newJobRunner(ctx, jp.Jobs())
+		if err != nil {
+			return fmt.Errorf("failed to register jobs: %w", err)
+		}
+	}
+
 	// Determine if we should merge health endpoints into main server
 	// This happens when HTTP and Health ports are the same
 	mergeServers := cfg.HTTPPort == cfg.HealthPort
@@ -93,6 +103,12 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 
 	// OnStart succeeded, mark as healthy
 	healthStatus.SetHealthy(true)
+
+	// Start cron runner after app is healthy
+	if jobs != nil {
+		jobs.Start()
+		log.Println("Started scheduled jobs")
+	}
 
 	routes := app.Routes()
 
@@ -149,6 +165,11 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 			defer cancel()
 			server.Shutdown(shutdownCtx)
 
+			// Stop scheduled jobs
+			if jobs != nil {
+				jobs.Stop()
+			}
+
 			// Call app.OnStop()
 			if err := app.OnStop(ctx); err != nil {
 				log.Printf("Error during OnStop: %v", err)
@@ -174,6 +195,11 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		healthServer.Shutdown(shutdownCtx)
+
+		// Stop scheduled jobs
+		if jobs != nil {
+			jobs.Stop()
+		}
 
 		// Call app.OnStop()
 		if err := app.OnStop(ctx); err != nil {
@@ -272,6 +298,11 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 		if err := healthServer.Shutdown(shutdownCtx); err != nil {
 			log.Printf("Health server forced to shutdown: %v", err)
 		}
+	}
+
+	// Stop scheduled jobs
+	if jobs != nil {
+		jobs.Stop()
 	}
 
 	// Call app.OnStop()
