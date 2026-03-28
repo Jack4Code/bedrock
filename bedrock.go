@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -50,6 +50,12 @@ type CORSConfig struct {
 	MaxAge           int
 }
 
+// Options configures optional bedrock behaviour.
+type Options struct {
+	CORS   *CORSConfig
+	Logger *slog.Logger // optional; defaults to slog.Default()
+}
+
 // DefaultCORSConfig returns a permissive CORS config for development
 func DefaultCORSConfig() CORSConfig {
 	return CORSConfig{
@@ -67,6 +73,20 @@ func Run(app App, cfg config.BaseConfig) error {
 }
 
 func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
+	return RunWithOptions(app, cfg, Options{CORS: &corsConfig})
+}
+
+func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	corsConfig := DefaultCORSConfig()
+	if opts.CORS != nil {
+		corsConfig = *opts.CORS
+	}
+
 	ctx := context.Background()
 
 	// Create health status tracker
@@ -76,7 +96,7 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 	var jobs *jobRunner
 	if jp, ok := app.(JobsProvider); ok {
 		var err error
-		jobs, err = newJobRunner(ctx, jp.Jobs())
+		jobs, err = newJobRunner(ctx, jp.Jobs(), logger)
 		if err != nil {
 			return fmt.Errorf("failed to register jobs: %w", err)
 		}
@@ -93,7 +113,7 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 		// This way Nomad/K8s can see the container is alive
 		healthServer = startHealthServer(strconv.Itoa(cfg.HealthPort), healthStatus)
 	} else {
-		log.Printf("Health endpoints will be merged into main server on port %d", cfg.HTTPPort)
+		logger.Info("health endpoints will be merged into main server", "port", cfg.HTTPPort)
 	}
 
 	// Call app.OnStart()
@@ -107,7 +127,7 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 	// Start cron runner after app is healthy
 	if jobs != nil {
 		jobs.Start()
-		log.Println("Started scheduled jobs")
+		logger.Info("started scheduled jobs")
 	}
 
 	routes := app.Routes()
@@ -129,7 +149,7 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 		if mergeServers {
 			// When merging servers but no app routes exist, we still need to start
 			// a server for the health endpoints
-			log.Println("No HTTP routes, starting server for health endpoints only")
+			logger.Info("no HTTP routes, starting server for health endpoints only")
 
 			router := mux.NewRouter()
 
@@ -144,9 +164,9 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 			}
 
 			go func() {
-				log.Printf("Starting health-only server on :%d", cfg.HTTPPort)
+				logger.Info("starting health-only server", "port", cfg.HTTPPort)
 				if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					log.Printf("Server error: %v", err)
+					logger.Error("server error", "err", err)
 				}
 			}()
 
@@ -158,7 +178,7 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 			<-quit
 
-			log.Println("Shutting down...")
+			logger.Info("shutting down")
 
 			// Shutdown server
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -172,14 +192,14 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 
 			// Call app.OnStop()
 			if err := app.OnStop(ctx); err != nil {
-				log.Printf("Error during OnStop: %v", err)
+				logger.Error("error during OnStop", "err", err)
 			}
 
 			return nil
 		}
 
 		// Separate health server is already running
-		log.Println("No HTTP routes, running in background mode")
+		logger.Info("no HTTP routes, running in background mode")
 
 		// Mark as ready (no HTTP server to wait for)
 		healthStatus.SetReady(true)
@@ -189,7 +209,7 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 		<-quit
 
-		log.Println("Shutting down...")
+		logger.Info("shutting down")
 
 		// Shutdown health server
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -203,7 +223,7 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 
 		// Call app.OnStop()
 		if err := app.OnStop(ctx); err != nil {
-			log.Printf("Error during OnStop: %v", err)
+			logger.Error("error during OnStop", "err", err)
 		}
 
 		return nil
@@ -218,7 +238,7 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 		router.HandleFunc("/health", healthCheckHandler(healthStatus))
 		router.HandleFunc("/ready", readyCheckHandler(healthStatus))
 		router.HandleFunc("/live", liveCheckHandler(healthStatus))
-		log.Printf("Health endpoints (/health, /ready, /live) registered on main router")
+		logger.Info("health endpoints registered on main router")
 	}
 
 	// Register app routes
@@ -265,9 +285,9 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 
 	// Start main server
 	go func() {
-		log.Printf("Starting server on :%d", cfg.HTTPPort)
+		logger.Info("starting server", "port", cfg.HTTPPort)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("Server error: %v", err)
+			logger.Error("server error", "err", err)
 		}
 	}()
 
@@ -279,7 +299,7 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("Shutting down servers...")
+	logger.Info("shutting down servers")
 
 	// Mark as not ready (stop accepting new traffic)
 	healthStatus.SetReady(false)
@@ -290,13 +310,13 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 
 	// Shutdown main server
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Main server forced to shutdown: %v", err)
+		logger.Error("main server forced to shutdown", "err", err)
 	}
 
 	// Shutdown health server only if it's separate
 	if !mergeServers {
 		if err := healthServer.Shutdown(shutdownCtx); err != nil {
-			log.Printf("Health server forced to shutdown: %v", err)
+			logger.Error("health server forced to shutdown", "err", err)
 		}
 	}
 
@@ -307,10 +327,10 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 
 	// Call app.OnStop()
 	if err := app.OnStop(ctx); err != nil {
-		log.Printf("Error during OnStop: %v", err)
+		logger.Error("error during OnStop", "err", err)
 	}
 
-	log.Println("Servers stopped")
+	logger.Info("servers stopped")
 	return nil
 }
 

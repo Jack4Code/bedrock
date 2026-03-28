@@ -3,7 +3,7 @@ package bedrock
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/robfig/cron/v3"
 )
@@ -28,14 +28,14 @@ type jobRunner struct {
 	c *cron.Cron
 }
 
-func newJobRunner(ctx context.Context, jobs []Job) (*jobRunner, error) {
+func newJobRunner(ctx context.Context, jobs []Job, logger *slog.Logger) (*jobRunner, error) {
 	c := cron.New()
 	for _, j := range jobs {
 		j := j
 		onError := j.OnError
 		if onError == nil {
 			onError = func(err error) {
-				log.Printf("job error (schedule=%s): %v", j.Schedule, err)
+				logger.Error("job error", "schedule", j.Schedule, "err", err)
 			}
 		}
 		_, err := c.AddFunc(j.Schedule, func() {
