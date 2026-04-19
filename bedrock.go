@@ -414,9 +414,15 @@ func DecodeJSON(r *http.Request, v any) error {
 type JSONResponse struct {
 	StatusCode int
 	Data       any
+	Headers    http.Header
 }
 
 func (r JSONResponse) Write(ctx context.Context, w http.ResponseWriter) error {
+	for key, values := range r.Headers {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(r.StatusCode)
 	return json.NewEncoder(w).Encode(r.Data)
@@ -424,6 +430,10 @@ func (r JSONResponse) Write(ctx context.Context, w http.ResponseWriter) error {
 
 func JSON(statusCode int, data any) Response {
 	return JSONResponse{StatusCode: statusCode, Data: data}
+}
+
+func JSONWithHeaders(statusCode int, data any, headers http.Header) Response {
+	return JSONResponse{StatusCode: statusCode, Data: data, Headers: headers}
 }
 
 func Error(data any) Response {
