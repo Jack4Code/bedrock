@@ -23,11 +23,6 @@ const (
 	// destructive admin actions, layer auth on top via Middleware.
 	Private Visibility = iota
 
-	// Public routes live on the public hostname (e.g. api.mydomain.com)
-	// with no edge gating. Open to the internet — apply application auth
-	// (JWT, etc.) as needed via Middleware.
-	Public
-
 	// Gated routes live on the public hostname behind an edge allowlist
 	// (e.g. Stripe IPs, Clerk IPs, monitoring service IPs, partner CIDRs).
 	// The handler should always verify the request itself — signature
@@ -38,6 +33,11 @@ const (
 	// shape fits: monitoring callbacks, partner integrations, CDN origin
 	// pulls, SSO assertions from a known IdP.
 	Gated
+
+	// Public routes live on the public hostname (e.g. api.mydomain.com)
+	// with no edge gating. Open to the internet — apply application auth
+	// (JWT, etc.) as needed via Middleware.
+	Public
 )
 
 func (v Visibility) String() string {
