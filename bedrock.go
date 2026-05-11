@@ -37,7 +37,8 @@ type Route struct {
 	Path       string
 	Handler    Handler
 	Middleware []Middleware // Optional per-route middleware
-	IsPrefix   bool        // If true, matches all paths with this prefix
+	IsPrefix   bool         // If true, matches all paths with this prefix
+	Visibility Visibility   // Defaults to Private (zero value) — fail closed
 }
 
 // CORSConfig holds CORS configuration
@@ -54,6 +55,7 @@ type CORSConfig struct {
 type Options struct {
 	CORS   *CORSConfig
 	Logger *slog.Logger // optional; defaults to slog.Default()
+	Hosts  HostConfig   // optional; if zero, host matching is skipped (dev mode)
 }
 
 // DefaultCORSConfig returns a permissive CORS config for development
@@ -81,11 +83,11 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
-
 	corsConfig := DefaultCORSConfig()
 	if opts.CORS != nil {
 		corsConfig = *opts.CORS
 	}
+	hosts := opts.Hosts
 
 	ctx := context.Background()
 
@@ -150,7 +152,6 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 			// When merging servers but no app routes exist, we still need to start
 			// a server for the health endpoints
 			logger.Info("no HTTP routes, starting server for health endpoints only")
-
 			router := mux.NewRouter()
 
 			// Register health endpoints (no CORS needed for health checks)
@@ -177,7 +178,6 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 			quit := make(chan os.Signal, 1)
 			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 			<-quit
-
 			logger.Info("shutting down")
 
 			// Shutdown server
@@ -208,7 +208,6 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 		<-quit
-
 		logger.Info("shutting down")
 
 		// Shutdown health server
@@ -233,7 +232,9 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 	router := mux.NewRouter()
 
 	// If merging servers, add health endpoints to main router BEFORE app routes
-	// Health endpoints should NOT have CORS or app middleware applied
+	// Health endpoints should NOT have CORS or app middleware applied,
+	// and should match on any host so probes from K8s/Nomad work regardless
+	// of the Host header.
 	if mergeServers {
 		router.HandleFunc("/health", healthCheckHandler(healthStatus))
 		router.HandleFunc("/ready", readyCheckHandler(healthStatus))
@@ -259,17 +260,50 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 				http.Error(w, "Internal Server Error", 500)
 			}
 		}
+
 		optionsFunc := func(w http.ResponseWriter, req *http.Request) {
 			// Preflight requests just return 200 OK with CORS headers
 			w.WriteHeader(http.StatusOK)
 		}
 
-		if r.IsPrefix {
-			router.PathPrefix(r.Path).HandlerFunc(handlerFunc).Methods(r.Method)
-			router.PathPrefix(r.Path).HandlerFunc(optionsFunc).Methods("OPTIONS")
+		// Choose where to register: a host-scoped subrouter when Hosts is
+		// configured, or the main router (any host) in dev mode.
+		var registerOn interface {
+			HandleFunc(string, func(http.ResponseWriter, *http.Request)) *mux.Route
+			PathPrefix(string) *mux.Route
+		} = router
+
+		if hosts.configured() {
+			host := hosts.hostFor(r.Visibility)
+			if host == "" {
+				logger.Warn("no host configured for visibility, skipping route",
+					"visibility", r.Visibility.String(),
+					"method", r.Method,
+					"path", r.Path,
+				)
+				continue
+			}
+			registerOn = router.Host(host).Subrouter()
+			logger.Info("registered route",
+				"method", r.Method,
+				"path", r.Path,
+				"visibility", r.Visibility.String(),
+				"host", host,
+			)
 		} else {
-			router.HandleFunc(r.Path, handlerFunc).Methods(r.Method)
-			router.HandleFunc(r.Path, optionsFunc).Methods("OPTIONS")
+			logger.Info("registered route (no host matching)",
+				"method", r.Method,
+				"path", r.Path,
+				"visibility", r.Visibility.String(),
+			)
+		}
+
+		if r.IsPrefix {
+			registerOn.PathPrefix(r.Path).HandlerFunc(handlerFunc).Methods(r.Method)
+			registerOn.PathPrefix(r.Path).HandlerFunc(optionsFunc).Methods("OPTIONS")
+		} else {
+			registerOn.HandleFunc(r.Path, handlerFunc).Methods(r.Method)
+			registerOn.HandleFunc(r.Path, optionsFunc).Methods("OPTIONS")
 		}
 	}
 
@@ -298,7 +332,6 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-
 	logger.Info("shutting down servers")
 
 	// Mark as not ready (stop accepting new traffic)
