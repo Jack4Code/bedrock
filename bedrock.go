@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -72,6 +73,17 @@ func DefaultCORSConfig() CORSConfig {
 
 func Run(app App, cfg config.BaseConfig) error {
 	return RunWithCORS(app, cfg, DefaultCORSConfig())
+}
+
+// isLoopbackHost reports whether a request's Host header names the loopback
+// interface (localhost, 127.0.0.1 or ::1), ignoring any port. Used as the
+// matcher for the loopback subrouter when HostConfig.TrustLoopback is set.
+func isLoopbackHost(r *http.Request, _ *mux.RouteMatch) bool {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
 func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
@@ -242,6 +254,16 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 		logger.Info("health endpoints registered on main router")
 	}
 
+	// When loopback trust is enabled, build one shared subrouter that matches a
+	// loopback Host header. Every route is also registered here (below),
+	// regardless of visibility, so co-located callers hitting the server
+	// directly on localhost reach all routes. See HostConfig.TrustLoopback.
+	var loopbackRouter *mux.Router
+	if hosts.configured() && hosts.TrustLoopback {
+		loopbackRouter = router.NewRoute().MatcherFunc(isLoopbackHost).Subrouter()
+		logger.Warn("loopback trust enabled: all routes are served to localhost callers regardless of visibility")
+	}
+
 	// Register app routes
 	for _, route := range routes {
 		r := route
@@ -298,12 +320,25 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 			)
 		}
 
-		if r.IsPrefix {
-			registerOn.PathPrefix(r.Path).HandlerFunc(handlerFunc).Methods(r.Method)
-			registerOn.PathPrefix(r.Path).HandlerFunc(optionsFunc).Methods("OPTIONS")
-		} else {
-			registerOn.HandleFunc(r.Path, handlerFunc).Methods(r.Method)
-			registerOn.HandleFunc(r.Path, optionsFunc).Methods("OPTIONS")
+		// registerRoute wires the handler + OPTIONS preflight onto a target
+		// router. Called for the visibility-scoped target and, when enabled,
+		// the shared loopback subrouter.
+		registerRoute := func(target interface {
+			HandleFunc(string, func(http.ResponseWriter, *http.Request)) *mux.Route
+			PathPrefix(string) *mux.Route
+		}) {
+			if r.IsPrefix {
+				target.PathPrefix(r.Path).HandlerFunc(handlerFunc).Methods(r.Method)
+				target.PathPrefix(r.Path).HandlerFunc(optionsFunc).Methods("OPTIONS")
+			} else {
+				target.HandleFunc(r.Path, handlerFunc).Methods(r.Method)
+				target.HandleFunc(r.Path, optionsFunc).Methods("OPTIONS")
+			}
+		}
+
+		registerRoute(registerOn)
+		if loopbackRouter != nil {
+			registerRoute(loopbackRouter)
 		}
 	}
 

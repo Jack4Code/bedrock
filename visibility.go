@@ -64,6 +64,23 @@ type HostConfig struct {
 	Public  string // e.g. "api.mydomain.com"
 	Private string // e.g. "api.internal.mydomain.com"
 	Gated   string // e.g. "api.mydomain.com" (often same as Public)
+
+	// TrustLoopback, when true, additionally registers ALL routes — regardless
+	// of Visibility — on a subrouter that matches a loopback Host header
+	// (localhost, 127.0.0.1 or ::1, with or without a port). It does not change
+	// the per-visibility host matching for external traffic.
+	//
+	// This exists for co-located callers that reach the server directly,
+	// bypassing the reverse proxy — e.g. a server-rendered frontend running on
+	// the same host that calls http://localhost:<port>. Such a request carries
+	// Host: localhost and would otherwise match no visibility subrouter (404).
+	//
+	// SECURITY: only enable this when the HTTP port is not reachable from
+	// outside the host (firewalled to loopback). If the port is exposed, a
+	// remote client could send Host: localhost and reach gated/private routes,
+	// bypassing the edge allowlist. The reverse-proxy gating is the real
+	// boundary; this flag deliberately trusts the loopback interface instead.
+	TrustLoopback bool
 }
 
 // hostFor returns the hostname a route with the given Visibility should be
