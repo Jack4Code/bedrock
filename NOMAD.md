@@ -209,6 +209,88 @@ Returns the metrics port to use, checking `NOMAD_PORT_metrics` first. Falls back
 4. **Test locally**: Use `NOMAD_PORT_*` environment variables to test Nomad behavior without deploying
 5. **Monitor logs**: Watch for port resolution warnings in your application logs
 
+## Split Deployments (Visibility-Scoped Runtimes)
+
+By default a single bedrock process registers **every** route, partitioned onto
+hostnames by `Visibility` (see `HostConfig`). The reverse proxy + `Host` header
+decide what is reachable from where.
+
+You can instead deploy the **same image** as several Nomad task groups, where
+each group serves only a subset of visibilities. A public-facing group serving
+`{Public, Gated}` simply doesn't register your `Private` routes — they're absent
+from that process, not merely host-gated. This buys you:
+
+- **Stronger isolation** — there's no Host-spoof or proxy-misconfig path to a
+  route the process never wired up.
+- **Independent scaling** — scale the public fleet without scaling admin/private.
+- **Independent blast radius** — deploying public routes doesn't bounce private.
+- **Credential separation** — the private group can hold creds the public can't.
+
+### Selecting the surface: `BEDROCK_SERVE`
+
+Set `BEDROCK_SERVE` to a comma-separated list of visibility names
+(`public`, `private`, `gated`; case-insensitive). When unset, the process serves
+everything (the original behavior). An invalid name fails startup rather than
+silently serving everything.
+
+In code this maps to `Options.Serve []Visibility`; the env var wins when both are
+set, so you parameterise per task group without code changes.
+
+### Running jobs once: `BEDROCK_RUN_JOBS`
+
+`OnStart` and your `JobsProvider` run in **every** process. If you split into
+three groups, scheduled jobs would fire 3×. Set `BEDROCK_RUN_JOBS=false` on all
+but one group so cron runs once. Defaults to `true`. In code: `Options.RunJobs
+*bool`; the env var wins when set.
+
+### Example: public group + internal group
+
+```hcl
+job "bedrock-app" {
+  datacenters = ["dc1"]
+
+  # Public-facing surface: Public + Gated routes. Does not run jobs.
+  group "public" {
+    count = 3
+    network { port "http" {}  port "health" {} }
+    task "server" {
+      driver = "docker"
+      config { image = "your-bedrock-app:latest"  ports = ["http", "health"] }
+      env {
+        BEDROCK_SERVE    = "public,gated"
+        BEDROCK_RUN_JOBS = "false"
+      }
+      service { name = "bedrock-app-public"  port = "http" }
+    }
+  }
+
+  # Internal surface: Private routes only. Runs the scheduled jobs.
+  group "internal" {
+    count = 1
+    network { port "http" {}  port "health" {} }
+    task "server" {
+      driver = "docker"
+      config { image = "your-bedrock-app:latest"  ports = ["http", "health"] }
+      env {
+        BEDROCK_SERVE    = "private"
+        BEDROCK_RUN_JOBS = "true"
+      }
+      service { name = "bedrock-app-internal"  port = "http" }
+    }
+  }
+}
+```
+
+### Caveat: Public and Gated sharing a hostname
+
+`Public` and `Gated` typically share the public hostname; the difference is the
+edge allowlist, not the `Host`. If you split them into **different** task groups,
+your reverse proxy can no longer tell them apart by `Host` alone — it must route
+by path or allowlist to reach the right group. Splitting along the host boundary
+(`{Public, Gated}` vs `{Private}`) avoids this entirely and is the common case.
+Arbitrary subsets are supported; this is a proxy-topology constraint, not a
+bedrock one.
+
 ## Troubleshooting
 
 ### Ports not being detected

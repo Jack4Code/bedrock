@@ -1,6 +1,9 @@
 package bedrock
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Visibility declares the network surface a Route is exposed on.
 //
@@ -51,6 +54,53 @@ func (v Visibility) String() string {
 	default:
 		return fmt.Sprintf("visibility(%d)", int(v))
 	}
+}
+
+// ParseVisibility is the inverse of String: it parses a visibility name
+// ("public", "private" or "gated", case-insensitive, surrounding space
+// ignored) into a Visibility. It is used to read the BEDROCK_SERVE env var.
+func ParseVisibility(s string) (Visibility, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "private":
+		return Private, nil
+	case "gated":
+		return Gated, nil
+	case "public":
+		return Public, nil
+	default:
+		return 0, fmt.Errorf("unknown visibility %q (want public, private or gated)", s)
+	}
+}
+
+// serveSet is the set of visibilities a process registers routes for. A nil or
+// empty set means "serve all visibilities" — the default, backward-compatible
+// behaviour where one process serves every surface. A non-empty set restricts
+// the process to the listed visibilities, so the same image can be deployed as
+// separate task groups that each own a subset of the surface. See Options.Serve.
+type serveSet map[Visibility]bool
+
+// serves reports whether routes of the given visibility should be registered.
+// An empty set serves everything.
+func (s serveSet) serves(v Visibility) bool {
+	if len(s) == 0 {
+		return true
+	}
+	return s[v]
+}
+
+// String renders the set as a sorted, comma-separated list for logging, or
+// "all" when the set is empty.
+func (s serveSet) String() string {
+	if len(s) == 0 {
+		return "all"
+	}
+	names := make([]string, 0, len(s))
+	for _, v := range []Visibility{Public, Gated, Private} {
+		if s[v] {
+			names = append(names, v.String())
+		}
+	}
+	return strings.Join(names, ",")
 }
 
 // HostConfig maps each Visibility to the hostname it should match in the

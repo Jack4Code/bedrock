@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -57,6 +58,28 @@ type Options struct {
 	CORS   *CORSConfig
 	Logger *slog.Logger // optional; defaults to slog.Default()
 	Hosts  HostConfig   // optional; if zero, host matching is skipped (dev mode)
+
+	// Serve restricts which visibilities this process registers routes for.
+	// An empty slice (the default) serves every visibility, preserving the
+	// single-process behaviour. A non-empty slice serves only the listed
+	// visibilities; routes of any other visibility are skipped (404), exactly
+	// as if no host were configured for them.
+	//
+	// This lets the same image run as separate task groups that each own a
+	// subset of the surface — e.g. a public-facing group serving {Public,
+	// Gated} and an internal group serving {Private} — so private routes are
+	// not merely host-gated but absent from the public process entirely.
+	//
+	// The BEDROCK_SERVE env var (comma-separated visibility names, e.g.
+	// "public,gated") overrides this field when set, so deployments can
+	// parameterise the surface per task group without code changes.
+	Serve []Visibility
+
+	// RunJobs controls whether this process starts the app's scheduled jobs
+	// (its JobsProvider). It defaults to true. Set it to false on all but one
+	// task group in a split deployment so cron jobs run once, not once per
+	// group. The BEDROCK_RUN_JOBS env var (a bool) overrides this when set.
+	RunJobs *bool
 }
 
 // DefaultCORSConfig returns a permissive CORS config for development
@@ -90,6 +113,56 @@ func RunWithCORS(app App, cfg config.BaseConfig, corsConfig CORSConfig) error {
 	return RunWithOptions(app, cfg, Options{CORS: &corsConfig})
 }
 
+// resolveServe determines which visibilities this process should serve. The
+// BEDROCK_SERVE env var (comma-separated visibility names) takes precedence
+// over optsServe when set; if it is set but names no valid visibility, that's
+// a configuration error (fail fast rather than silently serving everything).
+// A nil result means "serve all".
+func resolveServe(optsServe []Visibility) (serveSet, error) {
+	if raw, ok := os.LookupEnv("BEDROCK_SERVE"); ok {
+		set := serveSet{}
+		for tok := range strings.SplitSeq(raw, ",") {
+			if strings.TrimSpace(tok) == "" {
+				continue
+			}
+			v, err := ParseVisibility(tok)
+			if err != nil {
+				return nil, fmt.Errorf("BEDROCK_SERVE: %w", err)
+			}
+			set[v] = true
+		}
+		if len(set) == 0 {
+			return nil, fmt.Errorf("BEDROCK_SERVE is set to %q but names no valid visibility", raw)
+		}
+		return set, nil
+	}
+	if len(optsServe) > 0 {
+		set := serveSet{}
+		for _, v := range optsServe {
+			set[v] = true
+		}
+		return set, nil
+	}
+	return nil, nil // serve all
+}
+
+// resolveRunJobs determines whether this process runs scheduled jobs. The
+// BEDROCK_RUN_JOBS env var (a bool) takes precedence over optsRunJobs; absent
+// both, jobs run (the default).
+func resolveRunJobs(optsRunJobs *bool) (bool, error) {
+	if raw, ok := os.LookupEnv("BEDROCK_RUN_JOBS"); ok {
+		b, err := strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return false, fmt.Errorf("BEDROCK_RUN_JOBS: invalid bool %q: %w", raw, err)
+		}
+		return b, nil
+	}
+	if optsRunJobs != nil {
+		return *optsRunJobs, nil
+	}
+	return true, nil
+}
+
 func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 	logger := opts.Logger
 	if logger == nil {
@@ -101,18 +174,36 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 	}
 	hosts := opts.Hosts
 
+	// Resolve which visibilities this process serves and whether it runs jobs.
+	// Both can be overridden by env so the same image is parameterised per task
+	// group. Resolve before anything starts so a bad config fails fast.
+	served, err := resolveServe(opts.Serve)
+	if err != nil {
+		return err
+	}
+	runJobs, err := resolveRunJobs(opts.RunJobs)
+	if err != nil {
+		return err
+	}
+	logger.Info("resolved serve configuration", "serve", served.String(), "run_jobs", runJobs)
+
 	ctx := context.Background()
 
 	// Create health status tracker
 	healthStatus := newHealthStatus()
 
-	// Start cron jobs if the app provides them
+	// Start cron jobs if the app provides them and this process is designated
+	// to run them. In a split deployment only one task group should set
+	// run_jobs=true so jobs fire once, not once per group.
 	var jobs *jobRunner
 	if jp, ok := app.(JobsProvider); ok {
-		var err error
-		jobs, err = newJobRunner(ctx, jp.Jobs(), logger)
-		if err != nil {
-			return fmt.Errorf("failed to register jobs: %w", err)
+		if runJobs {
+			jobs, err = newJobRunner(ctx, jp.Jobs(), logger)
+			if err != nil {
+				return fmt.Errorf("failed to register jobs: %w", err)
+			}
+		} else {
+			logger.Info("scheduled jobs disabled for this process (run_jobs=false)")
 		}
 	}
 
@@ -267,6 +358,17 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 	// Register app routes
 	for _, route := range routes {
 		r := route
+
+		// Skip routes whose visibility this process isn't serving. The route is
+		// absent entirely (404), not merely host-gated — see Options.Serve.
+		if !served.serves(r.Visibility) {
+			logger.Info("route not served by this process, skipping",
+				"visibility", r.Visibility.String(),
+				"method", r.Method,
+				"path", r.Path,
+			)
+			continue
+		}
 
 		// Apply middleware if present
 		handler := r.Handler
