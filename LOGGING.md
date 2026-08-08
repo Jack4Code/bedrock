@@ -1,106 +1,84 @@
 # Logging in Bedrock
 
-## Current State
-
-Bedrock uses Go's standard `log` package internally (`log.Printf`, `log.Println`). All log output goes to **stderr**. There is no structured formatting, no log levels, and no way to redirect bedrock's internal logs to an external service.
-
-This is fine for local development. In production it creates a gap: if you add an observability service like Axiom, Kibana, or a similar log aggregator, bedrock's own logs (startup messages, job errors, shutdown events) will not flow there automatically.
-
-## Where Logs Go in Practice
-
-**Local / development:** stderr, printed to your terminal.
-
-**Nomad:** stdout/stderr are captured by the Nomad agent and written to alloc log files on disk (`/alloc/logs/<task>.std{out,err}.N`). They do not leave the host unless you run a separate log shipper (Filebeat, Vector, Fluent Bit, etc.) or configure Nomad's log collection.
-
-**Other platforms (Fly.io, Railway, Render, K8s):** similar story — the platform captures stdout/stderr and may surface it in a dashboard, but structured log forwarding to a third-party service requires either a log shipper or structured JSON output that the platform's agent can parse.
-
-## The Sentry Case (Different)
-
-Sentry does not consume log lines. It works via explicit SDK calls (`sentry.CaptureException(err)`). If you want job errors to reach Sentry, use the `OnError` hook on each `Job`:
+Bedrock logs through `log/slog`. Pass it a `*slog.Logger` and everything the framework says — startup, route registration, job errors, shutdown — goes through your handler, alongside the rest of your application's logs.
 
 ```go
-func (a *App) Jobs() []bedrock.Job {
-    return []bedrock.Job{
-        {
-            Schedule: "@weekly",
-            Handler:  a.cleanupWebhookEvents,
-            OnError: func(err error) {
-                sentry.CaptureException(err)
-                slog.Error("cleanup job failed", "err", err)
-            },
-        },
-    }
-}
-```
-
-No bedrock changes needed for Sentry — the hook is the right place.
-
-## The Structured Logging Problem
-
-For Axiom, Kibana, Datadog Logs, and similar services, the typical integration path is:
-
-1. Write structured JSON logs (key-value pairs, not free-form strings)
-2. Either ship them via a log collector, or write them directly to the service's ingest API
-
-Go's stdlib `slog` package (available since Go 1.21) handles this well. You configure a handler — a JSON handler, an Axiom handler, etc. — and pass a `*slog.Logger` into your code. The logger is just an interface; swapping the underlying handler changes where logs go.
-
-The problem today is that bedrock calls `log.Printf` directly, bypassing any `slog.Logger` the app might have configured. Even if your app writes structured logs everywhere, bedrock's own output remains unstructured and separate.
-
-## Proposed Fix: Logger Injection
-
-The fix is to let the app pass a `*slog.Logger` into bedrock at startup. Bedrock would use it for all internal logging instead of calling `log.Printf` directly.
-
-**Proposed API:**
-
-```go
-type Options struct {
-    CORS   *CORSConfig
-    Logger *slog.Logger  // optional; defaults to slog.Default()
-}
-
-func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error
-```
-
-Existing `Run` and `RunWithCORS` would continue to work unchanged (they'd call `RunWithOptions` internally with `Logger: slog.Default()`).
-
-**App usage with Axiom:**
-
-```go
-import (
-    "github.com/axiomhq/axiom-go/adapters/slog"
-    axslog "log/slog"
-)
-
-func main() {
-    handler, _ := axiom.New()
-    logger := axslog.New(handler)
-
-    bedrock.RunWithOptions(app, cfg, bedrock.Options{
-        Logger: logger,
-    })
-}
-```
-
-**App usage with JSON to stdout (for a log shipper to pick up):**
-
-```go
-logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 bedrock.RunWithOptions(app, cfg, bedrock.Options{
     Logger: logger,
 })
 ```
 
-Once bedrock uses the injected logger, all of bedrock's startup messages, job error logs, and shutdown events flow through the same handler as the rest of the application.
+`Options.Logger` is optional and defaults to `slog.Default()`. `bedrock.Run` and `bedrock.RunWithCORS` use the default too, so if you call `slog.SetDefault` in `main` before starting, you get the same result without touching `Options`.
 
-## What This Does Not Cover
+The gRPC module takes its own logger the same way, for the same reason:
 
-**Trace context / request IDs:** Passing a logger through `RunWithOptions` handles process-level logs. For per-request structured logging (attaching a request ID or trace ID to every log line in a handler), the app needs to store the logger in the request context and retrieve it in each handler. Bedrock could help by injecting a logger into the context before calling each route handler, but that is a separate concern.
+```go
+bgrpc.New(bgrpc.Config{Port: cfg.GetGRPCPort(), Logger: logger}, svc.Register)
+```
 
-**Log levels:** `slog` supports levels (Debug, Info, Warn, Error). Bedrock's current internal logs are all informational or error. Once migrated to `slog`, a `MinLevel` option on the handler controls verbosity without code changes.
+## What bedrock logs
 
-## Status
+At `Info`: resolved serve configuration, health server startup, each registered route with its method, path and visibility, routes skipped because this process does not serve their visibility, each server starting, and the shutdown sequence.
 
-Not yet implemented. The current `log.Printf` calls in `bedrock.go` and `cron.go` would need to be replaced with `slog` calls, and `RunWithOptions` (or a similar entry point) would need to be added.
+At `Warn`: a route skipped because no host is configured for its visibility, loopback trust being enabled, and a server force-closing work still in flight at the deadline.
 
-The `OnError` hook on `Job` is available today and is the right place for Sentry integration without waiting for this work.
+At `Error`: a server that failed to drain in time, a listener that died unexpectedly, a job that returned an error, and an `OnStop` that returned one.
+
+Route registration is the chattiest part at startup — one line per route. If that is noise in your environment, raise the handler's level to `Warn`; nothing bedrock logs at `Info` is load-bearing once a service is running.
+
+## Job errors, and Sentry
+
+Sentry does not consume log lines — it works through explicit SDK calls. Each `Job` has an `OnError` hook, which is the right place:
+
+```go
+func (a *App) Jobs() []bedrock.Job {
+    return []bedrock.Job{{
+        Schedule: "@weekly",
+        Handler:  a.cleanupWebhookEvents,
+        OnError: func(err error) {
+            sentry.CaptureException(err)
+            slog.Error("cleanup job failed", "err", err)
+        },
+    }}
+}
+```
+
+Without an `OnError`, a failing job is logged at `Error` through bedrock's logger and nothing else happens. The job keeps its schedule either way — one failure does not unregister it.
+
+## Shipping logs somewhere
+
+Bedrock has no integration of its own and needs none: anything that satisfies `slog.Handler` works, which is how Axiom, Datadog, Kibana and the rest expose themselves to Go services. Construct the handler however that vendor's SDK says to, then hand bedrock a logger wrapping it:
+
+```go
+handler := someVendor.NewSlogHandler(...) // whatever the SDK provides
+
+bedrock.RunWithOptions(app, cfg, bedrock.Options{
+    Logger: slog.New(handler),
+})
+```
+
+Where output actually lands, absent a handler that ships it directly:
+
+- **Local:** stderr, in your terminal.
+- **Nomad:** the agent captures stdout/stderr into alloc log files (`/alloc/logs/<task>.std{out,err}.N`). They stay on the host unless you run a shipper (Vector, Fluent Bit, Filebeat) or configure Nomad's log collection.
+- **Fly.io, Railway, Render, Kubernetes:** the platform captures stdout/stderr and surfaces it in a dashboard. Structured forwarding to a third party still needs a shipper, or JSON output the platform's agent can parse.
+
+Writing JSON to **stdout** rather than stderr is usually what a collector expects, which is why the first example above uses `os.Stdout`.
+
+## What this does not cover
+
+**`BaseConfig.LogLevel` is not read by bedrock.** It is a configuration field for *your* use — bedrock never consults it, and setting `log_level = "debug"` in your TOML changes nothing on its own. Verbosity comes from the level on the handler you construct. If you want the config value to drive it, wire it yourself:
+
+```go
+var level slog.Level
+if err := level.UnmarshalText([]byte(cfg.LogLevel)); err != nil {
+    level = slog.LevelInfo
+}
+logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+```
+
+**The `config` package still uses the standard `log` package.** `resolvePort` writes two messages through `log.Printf` — one when a `NOMAD_PORT_*` variable is set, one when it is set but unparseable. They go to stderr unstructured, outside your handler. This is because port resolution runs while loading configuration, before a logger exists to inject. In practice it is two lines at startup, but it does mean a malformed `NOMAD_PORT_http` produces a warning your log aggregator will not see.
+
+**There is no per-request logger.** Bedrock passes the request's own context to handlers and does not attach a logger to it, so a request ID or trace ID on every line inside a handler is something you arrange yourself — typically middleware that puts a `*slog.Logger` with the request's attributes into the context.

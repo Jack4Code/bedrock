@@ -137,6 +137,15 @@ Whatever you pick, both phases have to fit inside your orchestrator's kill timeo
 | [RELEASING.md](RELEASING.md) | tagging the two modules, in the right order |
 | [config/README.md](config/README.md) | the config package |
 
+## Examples
+
+Both live in the main module, so `go vet ./...` compiles them and they cannot rot unnoticed.
+
+```bash
+go run ./examples/simple        # routes, uploads, lifecycle hooks, slog output
+go run ./examples/config-demo   # embedding BaseConfig in your own config struct
+```
+
 ## Development
 
 Both modules are tested separately — the root build does not compile `grpc/`, so a change spanning both needs both:

@@ -1,6 +1,10 @@
 # Binaries. `go build ./...` from the repo root drops the examples' main
-# packages here (config-demo), which is easy to commit by accident.
+# packages here, which is easy to commit by accident.
 /config-demo
+/simple
+
+# Written by `go run ./examples/simple`.
+/uploads/
 *.exe
 *.test
 *.out
