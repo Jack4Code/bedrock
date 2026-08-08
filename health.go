@@ -2,7 +2,6 @@ package bedrock
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"sync"
 )
@@ -14,7 +13,11 @@ type HealthStatus struct {
 	ready   bool
 }
 
-func newHealthStatus() *HealthStatus {
+// NewHealthStatus returns a health tracker that starts out neither healthy nor
+// ready. Bedrock creates one per process, but a caller can supply its own via
+// Options.Health when something outside the HTTP endpoints — the gRPC health
+// service, for instance — needs to report the same state.
+func NewHealthStatus() *HealthStatus {
 	return &HealthStatus{
 		healthy: false, // Not healthy until OnStart succeeds
 		ready:   false, // Not ready until app says so
@@ -74,27 +77,4 @@ func readyCheckHandler(status *HealthStatus) http.HandlerFunc {
 // liveCheckHandler returns an http.HandlerFunc for the /live endpoint (alias for health)
 func liveCheckHandler(status *HealthStatus) http.HandlerFunc {
 	return healthCheckHandler(status)
-}
-
-func startHealthServer(port string, status *HealthStatus) *http.Server {
-	mux := http.NewServeMux()
-
-	// Register health endpoints
-	mux.HandleFunc("/health", healthCheckHandler(status))
-	mux.HandleFunc("/ready", readyCheckHandler(status))
-	mux.HandleFunc("/live", liveCheckHandler(status))
-
-	server := &http.Server{
-		Addr:    ":" + port,
-		Handler: mux,
-	}
-
-	go func() {
-		log.Printf("Starting health server on :%s", port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("Health server error: %v", err)
-		}
-	}()
-
-	return server
 }

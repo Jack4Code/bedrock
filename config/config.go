@@ -16,6 +16,7 @@ type BaseConfig struct {
 	HTTPPort    int    `toml:"http_port" env:"HTTP_PORT"`
 	HealthPort  int    `toml:"health_port" env:"HEALTH_PORT"`
 	MetricsPort int    `toml:"metrics_port" env:"METRICS_PORT"`
+	GRPCPort    int    `toml:"grpc_port" env:"GRPC_PORT"`
 	LogLevel    string `toml:"log_level" env:"LOG_LEVEL"`
 	Environment string `toml:"environment" env:"ENVIRONMENT"`
 }
@@ -39,6 +40,15 @@ func (b *BaseConfig) GetHealthPort() int {
 // Otherwise, it falls back to the configured MetricsPort value.
 func (b *BaseConfig) GetMetricsPort() int {
 	return resolvePort("metrics", b.MetricsPort)
+}
+
+// GetGRPCPort returns the gRPC port to use, checking Nomad dynamic port allocation first.
+// If NOMAD_PORT_grpc is set and valid, it returns that value.
+// Otherwise, it falls back to the configured GRPCPort value.
+//
+// Pass the result to bgrpc.Config.Port. See GRPC.md.
+func (b *BaseConfig) GetGRPCPort() int {
+	return resolvePort("grpc", b.GRPCPort)
 }
 
 // resolvePort checks for Nomad dynamic port allocation and falls back to configured value.

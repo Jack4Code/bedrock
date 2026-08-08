@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Both modules. The grpc module is separate so that HTTP-only services
+        # do not carry protobuf in their module graph, which also means nothing
+        # in the root build exercises it.
+        module: [".", "grpc"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+
+      - name: vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+
+      - name: test
+        working-directory: ${{ matrix.module }}
+        run: go test -race ./...
+
+  # The grpc module builds in-tree through a replace directive that consumers
+  # never see, so passing the job above says nothing about whether anyone can
+  # actually install it. See RELEASING.md.
+  consumable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: scripts/check_submodule.sh

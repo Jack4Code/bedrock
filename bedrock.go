@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -80,7 +81,53 @@ type Options struct {
 	// task group in a split deployment so cron jobs run once, not once per
 	// group. The BEDROCK_RUN_JOBS env var (a bool) overrides this when set.
 	RunJobs *bool
+
+	// Servers are additional long-running components bedrock supervises
+	// alongside the HTTP router — a gRPC server, a metrics endpoint, a consumer
+	// loop. They are started after the app's OnStart, in the order given, and
+	// drained concurrently before its OnStop — so a server that will not drain
+	// costs the others nothing but the wait.
+	//
+	// A service with no HTTP routes but one or more Servers is a normal server,
+	// not a background process.
+	Servers []Server
+
+	// Health lets the caller supply the health tracker rather than have bedrock
+	// create one. Pass a shared instance when something outside the HTTP
+	// endpoints needs to report the same state — the gRPC health service, for
+	// example. Bedrock creates one when this is nil.
+	Health *HealthStatus
+
+	// ShutdownTimeout bounds the whole drain sequence. Servers drain
+	// concurrently within it, then the health server and the app's OnStop run
+	// with whatever is left — never less than OnStopTimeout. Defaults to
+	// DefaultShutdownTimeout.
+	ShutdownTimeout time.Duration
+
+	// OnStopTimeout is the slice of ShutdownTimeout held back for app cleanup,
+	// so OnStop is never handed an already-expired context.
+	//
+	// Without a reserve, a Server that uses its entire drain budget leaves
+	// nothing for OnStop, and for a gRPC server with a streaming or
+	// long-polling endpoint that is the normal case rather than the edge case:
+	// an open stream never drains on its own, so every deploy would reach
+	// OnStop with a dead context and silently skip flushing metrics,
+	// deregistering from service discovery, or closing the database.
+	//
+	// Servers get ShutdownTimeout minus this reserve; OnStop gets whatever
+	// remains, floored at this value. Defaults to a fifth of ShutdownTimeout.
+	// It must be shorter than ShutdownTimeout.
+	OnStopTimeout time.Duration
 }
+
+// DefaultShutdownTimeout is how long bedrock spends draining before giving up,
+// when Options.ShutdownTimeout is not set.
+const DefaultShutdownTimeout = 30 * time.Second
+
+// defaultOnStopReserveFraction is the share of ShutdownTimeout reserved for
+// OnStop when Options.OnStopTimeout is not set: enough for cleanup to do
+// something useful, small enough to leave servers most of the budget.
+const defaultOnStopReserveFraction = 5
 
 // DefaultCORSConfig returns a permissive CORS config for development
 func DefaultCORSConfig() CORSConfig {
@@ -164,6 +211,24 @@ func resolveRunJobs(optsRunJobs *bool) (bool, error) {
 }
 
 func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
+	// signal.NotifyContext replaces the hand-rolled quit channel this used to
+	// keep in three separate places, and makes the lifecycle testable: run takes
+	// a context, so a test cancels it directly instead of signalling the process.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return run(ctx, app, cfg, opts)
+}
+
+// run is the whole server lifecycle. Cancelling ctx begins shutdown.
+//
+// The ordering matters and is the same on every path: health server, OnStart,
+// jobs, servers on the way up; servers, health server, jobs, OnStop on the way
+// down. Servers start in the order given and drain together — they are
+// independent, and see teardown for why sharing one sequential budget was
+// worse. Every startup failure unwinds through the same teardown as a normal
+// shutdown, so a process that dies half-started still releases what it
+// acquired.
+func run(ctx context.Context, app App, cfg config.BaseConfig, opts Options) error {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -172,7 +237,22 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 	if opts.CORS != nil {
 		corsConfig = *opts.CORS
 	}
-	hosts := opts.Hosts
+	shutdownTimeout := opts.ShutdownTimeout
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = DefaultShutdownTimeout
+	}
+	onStopReserve := opts.OnStopTimeout
+	if onStopReserve <= 0 {
+		onStopReserve = shutdownTimeout / defaultOnStopReserveFraction
+	}
+	if onStopReserve >= shutdownTimeout {
+		return fmt.Errorf("OnStopTimeout (%s) must be shorter than ShutdownTimeout (%s): it is carved out of it, not added to it",
+			onStopReserve, shutdownTimeout)
+	}
+	healthStatus := opts.Health
+	if healthStatus == nil {
+		healthStatus = NewHealthStatus()
+	}
 
 	// Resolve which visibilities this process serves and whether it runs jobs.
 	// Both can be overridden by env so the same image is parameterised per task
@@ -187,18 +267,17 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 	}
 	logger.Info("resolved serve configuration", "serve", served.String(), "run_jobs", runJobs)
 
-	ctx := context.Background()
-
-	// Create health status tracker
-	healthStatus := newHealthStatus()
-
-	// Start cron jobs if the app provides them and this process is designated
-	// to run them. In a split deployment only one task group should set
-	// run_jobs=true so jobs fire once, not once per group.
+	// Build the job runner up front so an invalid cron expression fails before
+	// anything is listening, but do not start it until the app is healthy.
+	//
+	// Jobs deliberately get a background context rather than the lifecycle one:
+	// jobs.Stop() waits for a running job to finish, and handing them a context
+	// that is already cancelled by the shutdown signal would cut them off
+	// mid-work instead.
 	var jobs *jobRunner
 	if jp, ok := app.(JobsProvider); ok {
 		if runJobs {
-			jobs, err = newJobRunner(ctx, jp.Jobs(), logger)
+			jobs, err = newJobRunner(context.Background(), jp.Jobs(), logger)
 			if err != nil {
 				return fmt.Errorf("failed to register jobs: %w", err)
 			}
@@ -207,137 +286,183 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 		}
 	}
 
-	// Determine if we should merge health endpoints into main server
-	// This happens when HTTP and Health ports are the same
+	// Health endpoints share the application port when both are configured the
+	// same, rather than binding twice.
 	mergeServers := cfg.HTTPPort == cfg.HealthPort
 
-	// Only start separate health server if ports differ
-	var healthServer *http.Server
+	// The health server starts before OnStart so an orchestrator can see the
+	// container is alive while the application is still initialising.
+	var healthServer *httpServer
 	if !mergeServers {
-		// Start health server BEFORE calling OnStart
-		// This way Nomad/K8s can see the container is alive
-		healthServer = startHealthServer(strconv.Itoa(cfg.HealthPort), healthStatus)
+		healthServer = newHTTPServer("health", ":"+strconv.Itoa(cfg.HealthPort), healthMux(healthStatus), logger)
+		if err := healthServer.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start health server: %w", err)
+		}
+		logger.Info("started health server", "port", cfg.HealthPort)
 	} else {
 		logger.Info("health endpoints will be merged into main server", "port", cfg.HTTPPort)
 	}
 
-	// Call app.OnStart()
-	if err := app.OnStart(ctx); err != nil {
-		return fmt.Errorf("failed to start app: %w", err)
+	var (
+		started     []Server
+		jobsStarted bool
+	)
+
+	// teardown drains whatever is currently running. Both the normal shutdown
+	// and every startup failure go through it, which is why there is only one
+	// copy of this sequence.
+	teardown := func(runOnStop bool) {
+		deadline := time.Now().Add(shutdownTimeout)
+
+		// budget is what is left of the drain, floored at the OnStop reserve.
+		// Each phase asks for it fresh, so a phase that overran cannot hand the
+		// next one a context that is already dead.
+		budget := func() time.Duration {
+			return max(time.Until(deadline), onStopReserve)
+		}
+
+		// Servers drain concurrently, each with the whole server phase. They are
+		// independent listeners with no ordering relationship, and draining them
+		// in sequence made them share a budget they had no reason to share: one
+		// server that would not drain — a gRPC stream, an open SSE connection —
+		// consumed the deadline and every server behind it was cut off mid
+		// request. Running them together bounds the phase by the slowest server
+		// rather than by their sum.
+		serverCtx, cancelServers := context.WithDeadline(context.Background(), deadline.Add(-onStopReserve))
+		var wg sync.WaitGroup
+		for _, s := range started {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := s.Shutdown(serverCtx); err != nil {
+					logger.Error("server forced to shutdown", "server", s.Name(), "err", err)
+				}
+			}()
+		}
+		wg.Wait()
+		cancelServers()
+
+		// The health server goes down after them, so probes keep answering for
+		// as long as anything is still draining.
+		if healthServer != nil {
+			healthCtx, cancel := context.WithTimeout(context.Background(), budget())
+			err := healthServer.Shutdown(healthCtx)
+			cancel()
+			if err != nil {
+				logger.Error("server forced to shutdown", "server", healthServer.Name(), "err", err)
+			}
+		}
+		if jobsStarted {
+			jobs.Stop()
+		}
+		if runOnStop {
+			// OnStop is bounded so app cleanup cannot hold a shutdown open
+			// forever, but never below the reserve — see Options.OnStopTimeout.
+			stopCtx, cancel := context.WithTimeout(context.Background(), budget())
+			err := app.OnStop(stopCtx)
+			cancel()
+			if err != nil {
+				logger.Error("error during OnStop", "err", err)
+			}
+		}
 	}
 
-	// OnStart succeeded, mark as healthy
+	if err := app.OnStart(ctx); err != nil {
+		// OnStart failed, so there is nothing for OnStop to undo.
+		teardown(false)
+		return fmt.Errorf("failed to start app: %w", err)
+	}
 	healthStatus.SetHealthy(true)
 
-	// Start cron runner after app is healthy
+	// Routes are read after OnStart because handlers commonly close over state
+	// the app initialises there.
+	routes := app.Routes()
+	if mergeServers {
+		if err := checkReservedPaths(routes); err != nil {
+			// OnStart already ran, so unwind it rather than leaving its
+			// resources held by a process that is about to exit.
+			teardown(true)
+			return err
+		}
+	}
+
 	if jobs != nil {
 		jobs.Start()
+		jobsStarted = true
 		logger.Info("started scheduled jobs")
 	}
 
-	routes := app.Routes()
+	servers := make([]Server, 0, len(opts.Servers)+1)
+	switch {
+	case len(routes) > 0:
+		handler := buildRouter(routes, served, opts.Hosts, healthStatus, mergeServers, corsConfig, logger)
+		servers = append(servers, newHTTPServer("http", ":"+strconv.Itoa(cfg.HTTPPort), handler, logger))
+	case mergeServers:
+		// No application routes, but the health endpoints live on this port and
+		// still need something listening for them.
+		logger.Info("no HTTP routes, serving health endpoints only", "port", cfg.HTTPPort)
+		servers = append(servers, newHTTPServer("http", ":"+strconv.Itoa(cfg.HTTPPort), healthMux(healthStatus), logger))
+	}
+	servers = append(servers, opts.Servers...)
 
-	// Validate routes don't conflict with reserved health endpoints when merging
-	if mergeServers {
-		reservedPaths := []string{"/health", "/ready", "/live"}
-		for _, route := range routes {
-			for _, reserved := range reservedPaths {
-				if route.Path == reserved {
-					return fmt.Errorf("route conflict: application route %s conflicts with reserved health endpoint %s", route.Path, reserved)
-				}
+	for _, s := range servers {
+		if err := s.Start(ctx); err != nil {
+			teardown(true)
+			return fmt.Errorf("failed to start %s server: %w", s.Name(), err)
+		}
+		started = append(started, s)
+		logger.Info("server started", "server", s.Name())
+	}
+
+	healthStatus.SetReady(true)
+
+	if len(routes) == 0 && len(opts.Servers) == 0 {
+		logger.Info("no HTTP routes and no additional servers, running in background mode")
+	}
+
+	<-ctx.Done()
+	logger.Info("shutting down")
+
+	// Fail readiness before draining so load balancers stop sending new traffic
+	// while in-flight requests finish.
+	healthStatus.SetReady(false)
+	teardown(true)
+
+	logger.Info("servers stopped")
+	return nil
+}
+
+// checkReservedPaths rejects application routes that would shadow the health
+// endpoints. It only applies when the health endpoints share the application
+// port; on separate ports there is nothing to collide with.
+func checkReservedPaths(routes []Route) error {
+	reserved := []string{"/health", "/ready", "/live"}
+	for _, route := range routes {
+		for _, p := range reserved {
+			if route.Path == p {
+				return fmt.Errorf("route conflict: application route %s conflicts with reserved health endpoint %s", route.Path, p)
 			}
 		}
 	}
+	return nil
+}
 
-	if len(routes) == 0 {
-		// No HTTP routes, running in background mode
-		if mergeServers {
-			// When merging servers but no app routes exist, we still need to start
-			// a server for the health endpoints
-			logger.Info("no HTTP routes, starting server for health endpoints only")
-			router := mux.NewRouter()
-
-			// Register health endpoints (no CORS needed for health checks)
-			router.HandleFunc("/health", healthCheckHandler(healthStatus))
-			router.HandleFunc("/ready", readyCheckHandler(healthStatus))
-			router.HandleFunc("/live", liveCheckHandler(healthStatus))
-
-			server := &http.Server{
-				Addr:    ":" + strconv.Itoa(cfg.HTTPPort),
-				Handler: router,
-			}
-
-			go func() {
-				logger.Info("starting health-only server", "port", cfg.HTTPPort)
-				if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					logger.Error("server error", "err", err)
-				}
-			}()
-
-			// Mark as ready
-			healthStatus.SetReady(true)
-
-			// Wait for shutdown signal
-			quit := make(chan os.Signal, 1)
-			signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-			<-quit
-			logger.Info("shutting down")
-
-			// Shutdown server
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			server.Shutdown(shutdownCtx)
-
-			// Stop scheduled jobs
-			if jobs != nil {
-				jobs.Stop()
-			}
-
-			// Call app.OnStop()
-			if err := app.OnStop(ctx); err != nil {
-				logger.Error("error during OnStop", "err", err)
-			}
-
-			return nil
-		}
-
-		// Separate health server is already running
-		logger.Info("no HTTP routes, running in background mode")
-
-		// Mark as ready (no HTTP server to wait for)
-		healthStatus.SetReady(true)
-
-		// Wait for shutdown signal
-		quit := make(chan os.Signal, 1)
-		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-		<-quit
-		logger.Info("shutting down")
-
-		// Shutdown health server
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		healthServer.Shutdown(shutdownCtx)
-
-		// Stop scheduled jobs
-		if jobs != nil {
-			jobs.Stop()
-		}
-
-		// Call app.OnStop()
-		if err := app.OnStop(ctx); err != nil {
-			logger.Error("error during OnStop", "err", err)
-		}
-
-		return nil
-	}
-
-	// Create main HTTP server
+// buildRouter registers the application routes and returns the fully wrapped
+// handler for the main HTTP server.
+func buildRouter(
+	routes []Route,
+	served serveSet,
+	hosts HostConfig,
+	healthStatus *HealthStatus,
+	mergeServers bool,
+	corsConfig CORSConfig,
+	logger *slog.Logger,
+) http.Handler {
 	router := mux.NewRouter()
 
-	// If merging servers, add health endpoints to main router BEFORE app routes
-	// Health endpoints should NOT have CORS or app middleware applied,
-	// and should match on any host so probes from K8s/Nomad work regardless
-	// of the Host header.
+	// Health endpoints are registered before the app routes and outside CORS:
+	// they are infrastructure probes, and they match on any host so probes from
+	// K8s/Nomad work regardless of the Host header.
 	if mergeServers {
 		router.HandleFunc("/health", healthCheckHandler(healthStatus))
 		router.HandleFunc("/ready", readyCheckHandler(healthStatus))
@@ -355,7 +480,6 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 		logger.Warn("loopback trust enabled: all routes are served to localhost callers regardless of visibility")
 	}
 
-	// Register app routes
 	for _, route := range routes {
 		r := route
 
@@ -376,7 +500,6 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 			handler = Chain(handler, r.Middleware...)
 		}
 
-		// Register the route
 		handlerFunc := func(w http.ResponseWriter, req *http.Request) {
 			ctx := req.Context()
 			response := handler(ctx, req)
@@ -444,64 +567,7 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 		}
 	}
 
-	// Wrap router with CORS middleware
-	// Note: Health endpoints are registered before CORS, so they won't have CORS applied
-	// This is correct - health checks are infrastructure endpoints
-	corsHandler := corsMiddleware(corsConfig)(router)
-
-	server := &http.Server{
-		Addr:    ":" + strconv.Itoa(cfg.HTTPPort),
-		Handler: corsHandler,
-	}
-
-	// Start main server
-	go func() {
-		logger.Info("starting server", "port", cfg.HTTPPort)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("server error", "err", err)
-		}
-	}()
-
-	// Server is up, mark as ready
-	healthStatus.SetReady(true)
-
-	// Wait for shutdown signal
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	logger.Info("shutting down servers")
-
-	// Mark as not ready (stop accepting new traffic)
-	healthStatus.SetReady(false)
-
-	// Graceful shutdown
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Shutdown main server
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("main server forced to shutdown", "err", err)
-	}
-
-	// Shutdown health server only if it's separate
-	if !mergeServers {
-		if err := healthServer.Shutdown(shutdownCtx); err != nil {
-			logger.Error("health server forced to shutdown", "err", err)
-		}
-	}
-
-	// Stop scheduled jobs
-	if jobs != nil {
-		jobs.Stop()
-	}
-
-	// Call app.OnStop()
-	if err := app.OnStop(ctx); err != nil {
-		logger.Error("error during OnStop", "err", err)
-	}
-
-	logger.Info("servers stopped")
-	return nil
+	return corsMiddleware(corsConfig)(router)
 }
 
 // corsMiddleware wraps an http.Handler with CORS headers

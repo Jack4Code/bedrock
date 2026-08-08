@@ -1,0 +1,15 @@
+# Binaries. `go build ./...` from the repo root drops the examples' main
+# packages here, which is easy to commit by accident.
+/config-demo
+/simple
+
+# Written by `go run ./examples/simple`.
+/uploads/
+*.exe
+*.test
+*.out
+
+# Go workspace files are per-developer; the replace in grpc/go.mod is what the
+# repo relies on for cross-module builds. See RELEASING.md.
+go.work
+go.work.sum
