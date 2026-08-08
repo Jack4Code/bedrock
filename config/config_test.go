@@ -512,3 +512,64 @@ metrics_port = 5052
 		t.Errorf("expected GetHTTPPort() to return 34567 (from Nomad), got %d", config.GetHTTPPort())
 	}
 }
+
+// TestGRPCPort covers the gRPC port through the same three paths as the others:
+// TOML, the GRPC_PORT env override, and Nomad's dynamic allocation. Before
+// BaseConfig carried it, every gRPC service hand-rolled this — usually while
+// swallowing the Atoi error.
+func TestGRPCPort(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+
+	tomlContent := `
+http_port = 8080
+grpc_port = 9000
+`
+	if err := os.WriteFile(configPath, []byte(tomlContent), 0644); err != nil {
+		t.Fatalf("failed to write test config file: %v", err)
+	}
+
+	load := func(t *testing.T) BaseConfig {
+		t.Helper()
+		var config BaseConfig
+		if err := NewLoader(configPath).Load(&config); err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+		return config
+	}
+
+	t.Run("from TOML", func(t *testing.T) {
+		config := load(t)
+		if config.GRPCPort != 9000 {
+			t.Errorf("expected GRPCPort to be 9000, got %d", config.GRPCPort)
+		}
+		if config.GetGRPCPort() != 9000 {
+			t.Errorf("expected GetGRPCPort() to return 9000, got %d", config.GetGRPCPort())
+		}
+	})
+
+	t.Run("GRPC_PORT overrides TOML", func(t *testing.T) {
+		t.Setenv("GRPC_PORT", "9500")
+		config := load(t)
+		if config.GetGRPCPort() != 9500 {
+			t.Errorf("expected GetGRPCPort() to return 9500 (from GRPC_PORT), got %d", config.GetGRPCPort())
+		}
+	})
+
+	t.Run("Nomad takes precedence", func(t *testing.T) {
+		t.Setenv("GRPC_PORT", "9500")
+		t.Setenv("NOMAD_PORT_grpc", "27431")
+		config := load(t)
+		if config.GetGRPCPort() != 27431 {
+			t.Errorf("expected GetGRPCPort() to return 27431 (from Nomad), got %d", config.GetGRPCPort())
+		}
+	})
+
+	t.Run("invalid Nomad value falls back", func(t *testing.T) {
+		t.Setenv("NOMAD_PORT_grpc", "not_a_number")
+		config := load(t)
+		if config.GetGRPCPort() != 9000 {
+			t.Errorf("expected GetGRPCPort() to fall back to 9000, got %d", config.GetGRPCPort())
+		}
+	})
+}

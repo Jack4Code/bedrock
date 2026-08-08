@@ -20,6 +20,7 @@ type BaseConfig struct {
     HTTPPort    int    `toml:"http_port" env:"HTTP_PORT"`
     HealthPort  int    `toml:"health_port" env:"HEALTH_PORT"`
     MetricsPort int    `toml:"metrics_port" env:"METRICS_PORT"`
+    GRPCPort    int    `toml:"grpc_port" env:"GRPC_PORT"`
     LogLevel    string `toml:"log_level" env:"LOG_LEVEL"`
     Environment string `toml:"environment" env:"ENVIRONMENT"`
 }

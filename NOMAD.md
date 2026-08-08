@@ -35,6 +35,7 @@ func main() {
     httpPort := cfg.Bedrock.GetHTTPPort()     // Checks NOMAD_PORT_http first
     healthPort := cfg.Bedrock.GetHealthPort() // Checks NOMAD_PORT_health first
     metricsPort := cfg.Bedrock.GetMetricsPort() // Checks NOMAD_PORT_metrics first
+    grpcPort := cfg.Bedrock.GetGRPCPort()       // Checks NOMAD_PORT_grpc first
 
     // Start your app with resolved ports
     bedrock.Run(yourApp, cfg.Bedrock)
@@ -43,7 +44,7 @@ func main() {
 
 ### Nomad Job Specification
 
-Configure your Nomad job with dynamic port allocation using the labels `http`, `health`, and `metrics`:
+Configure your Nomad job with dynamic port allocation using the labels `http`, `health`, `metrics`, and — for a service using [bedrock/grpc](GRPC.md) — `grpc`:
 
 ```hcl
 job "bedrock-app" {
@@ -55,6 +56,7 @@ job "bedrock-app" {
       port "http" {}      # Exposed as NOMAD_PORT_http
       port "health" {}    # Exposed as NOMAD_PORT_health
       port "metrics" {}   # Exposed as NOMAD_PORT_metrics
+      port "grpc" {}      # Exposed as NOMAD_PORT_grpc (only if you serve gRPC)
     }
 
     task "server" {
@@ -62,7 +64,7 @@ job "bedrock-app" {
 
       config {
         image = "your-bedrock-app:latest"
-        ports = ["http", "health", "metrics"]
+        ports = ["http", "health", "metrics", "grpc"]
       }
 
       # Optional: Set static config values as fallback
@@ -70,6 +72,7 @@ job "bedrock-app" {
         HTTP_PORT = "8080"
         HEALTH_PORT = "8081"
         METRICS_PORT = "8082"
+        GRPC_PORT = "9000"
       }
 
       # Service registration
@@ -201,10 +204,14 @@ Returns the health port to use, checking `NOMAD_PORT_health` first. Falls back t
 
 Returns the metrics port to use, checking `NOMAD_PORT_metrics` first. Falls back to `MetricsPort` config value if Nomad variable is not set or invalid.
 
+#### `GetGRPCPort() int`
+
+Returns the gRPC port to use, checking `NOMAD_PORT_grpc` first. Falls back to `GRPCPort` config value if Nomad variable is not set or invalid. Pass it to `bgrpc.Config.Port` — see [GRPC.md](GRPC.md).
+
 ## Best Practices
 
-1. **Always use getter methods**: Use `GetHTTPPort()`, `GetHealthPort()`, and `GetMetricsPort()` instead of accessing fields directly
-2. **Use standard port labels**: Use `http`, `health`, and `metrics` as your Nomad port labels
+1. **Always use getter methods**: Use `GetHTTPPort()`, `GetHealthPort()`, `GetMetricsPort()` and `GetGRPCPort()` instead of accessing fields directly
+2. **Use standard port labels**: Use `http`, `health`, `metrics` and `grpc` as your Nomad port labels
 3. **Provide fallback config**: Include default ports in your TOML or environment for local development
 4. **Test locally**: Use `NOMAD_PORT_*` environment variables to test Nomad behavior without deploying
 5. **Monitor logs**: Watch for port resolution warnings in your application logs
@@ -296,8 +303,8 @@ bedrock one.
 ### Ports not being detected
 
 Check that:
-- Environment variables are named exactly `NOMAD_PORT_http`, `NOMAD_PORT_health`, `NOMAD_PORT_metrics` (case-sensitive)
-- Port labels in your Nomad job match: `http`, `health`, `metrics`
+- Environment variables are named exactly `NOMAD_PORT_http`, `NOMAD_PORT_health`, `NOMAD_PORT_metrics`, `NOMAD_PORT_grpc` (case-sensitive)
+- Port labels in your Nomad job match: `http`, `health`, `metrics`, `grpc`
 - The environment variables contain valid integer values
 
 ### App binding to wrong port
