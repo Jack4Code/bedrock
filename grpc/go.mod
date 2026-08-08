@@ -2,12 +2,19 @@ module github.com/Jack4Code/bedrock/grpc
 
 go 1.25.5
 
-// Development only: consumers resolve the parent from its published version.
-// Dropped when this module is tagged against a released bedrock.
+// Builds this module against the parent in the working tree rather than the
+// published version, so a change spanning both is testable before either is
+// tagged.
+//
+// A replace directive is only honoured in the main module, so this line does
+// nothing for anyone importing bedrock/grpc — the require below is what they
+// resolve, and it must therefore name a real published version. Keeping the two
+// in step is what RELEASING.md is for, and what scripts/check_submodule.sh
+// checks.
 replace github.com/Jack4Code/bedrock => ../
 
 require (
-	github.com/Jack4Code/bedrock v0.0.0-00010101000000-000000000000
+	github.com/Jack4Code/bedrock v0.5.0
 	google.golang.org/grpc v1.83.0
 )
 
