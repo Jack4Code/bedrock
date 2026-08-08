@@ -90,6 +90,23 @@ var _ bedrock.Server = (*Server)(nil)
 // *grpc.Server so services are attached before anything is served; it may be
 // nil for a server that exposes only health and reflection.
 //
+// Note the ordering, because it is the opposite of the HTTP side: bedrock reads
+// App.Routes after OnStart, so route handlers can close over state OnStart
+// initialised, but register runs here in main, before bedrock.Run is called at
+// all. *grpc.Server has no way to add a service once it is serving, so this
+// cannot be deferred.
+//
+// Register a pointer whose fields OnStart fills in:
+//
+//	svc := myservice.New(logger)      // OnStart populates svc.db
+//	bgrpc.New(cfg, svc.Register)      // safe: the pointer is what's registered
+//
+// Do not resolve dependencies inside the callback — they do not exist yet:
+//
+//	bgrpc.New(cfg, func(g *grpc.Server) {
+//	    pb.RegisterMyServiceServer(g, newService(app.db)) // app.db is still nil
+//	})
+//
 // The health service is always registered — it costs nothing and an
 // orchestrator configured for gRPC probes needs it to exist.
 func New(cfg Config, register func(*grpc.Server), opts ...Option) *Server {
