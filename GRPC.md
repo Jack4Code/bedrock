@@ -1,5 +1,7 @@
 # gRPC
 
+> New in bedrock v0.5.0 / bedrock/grpc v0.1.0. If you are upgrading an existing service, read the [changelog](CHANGELOG.md) first — the shutdown budget changed to make this work.
+
 Bedrock supervises gRPC servers through the same lifecycle it gives its HTTP router: started after your app's `OnStart`, drained before its `OnStop`, sharing one shutdown deadline.
 
 The gRPC support lives in a **separate Go module**, `github.com/Jack4Code/bedrock/grpc`. `google.golang.org/grpc` and protobuf pull in a large dependency tree, and a service that speaks only HTTP should not carry them in its module graph. Only services that import the module pay for it.

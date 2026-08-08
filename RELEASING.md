@@ -33,7 +33,7 @@ and there is nothing they can do about it except add a `replace` of their own.
 
 ## The order
 
-1. **Land the change** on `main`, both modules, with `grpc/go.mod` requiring the bedrock version you are about to tag.
+1. **Land the change** on `main`, both modules, with `grpc/go.mod` requiring the bedrock version you are about to tag, and a [CHANGELOG.md](CHANGELOG.md) entry for it. The changelog is where anyone deciding whether to upgrade will look first — behavioural changes that do not break compilation belong there, because a green `go build` will not surface them.
 
 2. **Tag the parent first.**
 
