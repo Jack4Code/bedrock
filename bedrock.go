@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -84,7 +85,8 @@ type Options struct {
 	// Servers are additional long-running components bedrock supervises
 	// alongside the HTTP router — a gRPC server, a metrics endpoint, a consumer
 	// loop. They are started after the app's OnStart, in the order given, and
-	// drained in reverse order before its OnStop.
+	// drained concurrently before its OnStop — so a server that will not drain
+	// costs the others nothing but the wait.
 	//
 	// A service with no HTTP routes but one or more Servers is a normal server,
 	// not a background process.
@@ -96,15 +98,36 @@ type Options struct {
 	// example. Bedrock creates one when this is nil.
 	Health *HealthStatus
 
-	// ShutdownTimeout bounds the whole drain sequence: every Server, the health
-	// server, and the app's OnStop share this single deadline. Defaults to
+	// ShutdownTimeout bounds the whole drain sequence. Servers drain
+	// concurrently within it, then the health server and the app's OnStop run
+	// with whatever is left — never less than OnStopTimeout. Defaults to
 	// DefaultShutdownTimeout.
 	ShutdownTimeout time.Duration
+
+	// OnStopTimeout is the slice of ShutdownTimeout held back for app cleanup,
+	// so OnStop is never handed an already-expired context.
+	//
+	// Without a reserve, a Server that uses its entire drain budget leaves
+	// nothing for OnStop, and for a gRPC server with a streaming or
+	// long-polling endpoint that is the normal case rather than the edge case:
+	// an open stream never drains on its own, so every deploy would reach
+	// OnStop with a dead context and silently skip flushing metrics,
+	// deregistering from service discovery, or closing the database.
+	//
+	// Servers get ShutdownTimeout minus this reserve; OnStop gets whatever
+	// remains, floored at this value. Defaults to a fifth of ShutdownTimeout.
+	// It must be shorter than ShutdownTimeout.
+	OnStopTimeout time.Duration
 }
 
 // DefaultShutdownTimeout is how long bedrock spends draining before giving up,
 // when Options.ShutdownTimeout is not set.
 const DefaultShutdownTimeout = 30 * time.Second
+
+// defaultOnStopReserveFraction is the share of ShutdownTimeout reserved for
+// OnStop when Options.OnStopTimeout is not set: enough for cleanup to do
+// something useful, small enough to leave servers most of the budget.
+const defaultOnStopReserveFraction = 5
 
 // DefaultCORSConfig returns a permissive CORS config for development
 func DefaultCORSConfig() CORSConfig {
@@ -199,9 +222,12 @@ func RunWithOptions(app App, cfg config.BaseConfig, opts Options) error {
 // run is the whole server lifecycle. Cancelling ctx begins shutdown.
 //
 // The ordering matters and is the same on every path: health server, OnStart,
-// jobs, servers, then in reverse — servers, health server, jobs, OnStop. Every
-// startup failure unwinds through the same teardown as a normal shutdown, so a
-// process that dies half-started still releases what it acquired.
+// jobs, servers on the way up; servers, health server, jobs, OnStop on the way
+// down. Servers start in the order given and drain together — they are
+// independent, and see teardown for why sharing one sequential budget was
+// worse. Every startup failure unwinds through the same teardown as a normal
+// shutdown, so a process that dies half-started still releases what it
+// acquired.
 func run(ctx context.Context, app App, cfg config.BaseConfig, opts Options) error {
 	logger := opts.Logger
 	if logger == nil {
@@ -214,6 +240,14 @@ func run(ctx context.Context, app App, cfg config.BaseConfig, opts Options) erro
 	shutdownTimeout := opts.ShutdownTimeout
 	if shutdownTimeout <= 0 {
 		shutdownTimeout = DefaultShutdownTimeout
+	}
+	onStopReserve := opts.OnStopTimeout
+	if onStopReserve <= 0 {
+		onStopReserve = shutdownTimeout / defaultOnStopReserveFraction
+	}
+	if onStopReserve >= shutdownTimeout {
+		return fmt.Errorf("OnStopTimeout (%s) must be shorter than ShutdownTimeout (%s): it is carved out of it, not added to it",
+			onStopReserve, shutdownTimeout)
 	}
 	healthStatus := opts.Health
 	if healthStatus == nil {
@@ -274,20 +308,47 @@ func run(ctx context.Context, app App, cfg config.BaseConfig, opts Options) erro
 		jobsStarted bool
 	)
 
-	// teardown drains whatever is currently running, in the reverse of the order
-	// it started. Both the normal shutdown and every startup failure go through
-	// it, which is why there is only one copy of this sequence.
+	// teardown drains whatever is currently running. Both the normal shutdown
+	// and every startup failure go through it, which is why there is only one
+	// copy of this sequence.
 	teardown := func(runOnStop bool) {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
+		deadline := time.Now().Add(shutdownTimeout)
 
-		for i := len(started) - 1; i >= 0; i-- {
-			if err := started[i].Shutdown(shutdownCtx); err != nil {
-				logger.Error("server forced to shutdown", "server", started[i].Name(), "err", err)
-			}
+		// budget is what is left of the drain, floored at the OnStop reserve.
+		// Each phase asks for it fresh, so a phase that overran cannot hand the
+		// next one a context that is already dead.
+		budget := func() time.Duration {
+			return max(time.Until(deadline), onStopReserve)
 		}
+
+		// Servers drain concurrently, each with the whole server phase. They are
+		// independent listeners with no ordering relationship, and draining them
+		// in sequence made them share a budget they had no reason to share: one
+		// server that would not drain — a gRPC stream, an open SSE connection —
+		// consumed the deadline and every server behind it was cut off mid
+		// request. Running them together bounds the phase by the slowest server
+		// rather than by their sum.
+		serverCtx, cancelServers := context.WithDeadline(context.Background(), deadline.Add(-onStopReserve))
+		var wg sync.WaitGroup
+		for _, s := range started {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := s.Shutdown(serverCtx); err != nil {
+					logger.Error("server forced to shutdown", "server", s.Name(), "err", err)
+				}
+			}()
+		}
+		wg.Wait()
+		cancelServers()
+
+		// The health server goes down after them, so probes keep answering for
+		// as long as anything is still draining.
 		if healthServer != nil {
-			if err := healthServer.Shutdown(shutdownCtx); err != nil {
+			healthCtx, cancel := context.WithTimeout(context.Background(), budget())
+			err := healthServer.Shutdown(healthCtx)
+			cancel()
+			if err != nil {
 				logger.Error("server forced to shutdown", "server", healthServer.Name(), "err", err)
 			}
 		}
@@ -295,10 +356,12 @@ func run(ctx context.Context, app App, cfg config.BaseConfig, opts Options) erro
 			jobs.Stop()
 		}
 		if runOnStop {
-			// OnStop shares the drain deadline instead of receiving an
-			// uncancellable context, so app cleanup cannot hold a shutdown open
-			// forever.
-			if err := app.OnStop(shutdownCtx); err != nil {
+			// OnStop is bounded so app cleanup cannot hold a shutdown open
+			// forever, but never below the reserve — see Options.OnStopTimeout.
+			stopCtx, cancel := context.WithTimeout(context.Background(), budget())
+			err := app.OnStop(stopCtx)
+			cancel()
+			if err != nil {
 				logger.Error("error during OnStop", "err", err)
 			}
 		}

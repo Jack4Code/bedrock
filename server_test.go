@@ -68,6 +68,7 @@ type fakeApp struct {
 
 	mu             sync.Mutex
 	onStopDeadline bool
+	onStopBudget   time.Duration
 }
 
 func (a *fakeApp) OnStart(ctx context.Context) error {
@@ -76,9 +77,10 @@ func (a *fakeApp) OnStart(ctx context.Context) error {
 }
 
 func (a *fakeApp) OnStop(ctx context.Context) error {
-	_, ok := ctx.Deadline()
+	deadline, ok := ctx.Deadline()
 	a.mu.Lock()
 	a.onStopDeadline = ok
+	a.onStopBudget = time.Until(deadline)
 	a.mu.Unlock()
 	a.events.add("OnStop")
 	return nil
@@ -92,6 +94,14 @@ func (a *fakeApp) stopHadDeadline() bool {
 	return a.onStopDeadline
 }
 
+// stopBudget is how much time OnStop had left when it was called. Negative
+// means it was handed an already-expired context.
+func (a *fakeApp) stopBudget() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.onStopBudget
+}
+
 type fakeServer struct {
 	name     string
 	events   *eventLog
@@ -99,6 +109,9 @@ type fakeServer struct {
 	// blockShutdown holds Shutdown until the context expires, standing in for a
 	// server with work that will not drain.
 	blockShutdown bool
+
+	mu             sync.Mutex
+	shutdownBudget time.Duration
 }
 
 func (s *fakeServer) Name() string { return s.name }
@@ -113,6 +126,11 @@ func (s *fakeServer) Start(ctx context.Context) error {
 }
 
 func (s *fakeServer) Shutdown(ctx context.Context) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		s.mu.Lock()
+		s.shutdownBudget = time.Until(deadline)
+		s.mu.Unlock()
+	}
 	if s.blockShutdown {
 		<-ctx.Done()
 		s.events.add("shutdown-timeout-" + s.name)
@@ -120,6 +138,13 @@ func (s *fakeServer) Shutdown(ctx context.Context) error {
 	}
 	s.events.add("shutdown-" + s.name)
 	return nil
+}
+
+// drainBudget is how much time this server had left when Shutdown was called.
+func (s *fakeServer) drainBudget() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shutdownBudget
 }
 
 // quietLogger keeps lifecycle logging out of test output.
@@ -159,8 +184,9 @@ func waitForHTTP(t *testing.T, url string) {
 // ---------------------------------------------------------------------------
 
 // TestLifecycleOrdering pins the contract Options.Servers exists to provide:
-// servers come up after the app and go down before it, and they drain in the
-// reverse of the order they started.
+// servers come up after the app, in the order given, and every one of them is
+// drained before the app's OnStop. Servers drain concurrently, so the order
+// they finish in is deliberately not asserted.
 func TestLifecycleOrdering(t *testing.T) {
 	log := &eventLog{}
 	app := &fakeApp{events: log}
@@ -180,7 +206,8 @@ func TestLifecycleOrdering(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("run returned %v", err)
 	}
-	log.requireOrder(t, "OnStart", "start-a", "start-b", "shutdown-b", "shutdown-a", "OnStop")
+	log.requireOrder(t, "OnStart", "start-a", "start-b", "shutdown-a", "OnStop")
+	log.requireOrder(t, "start-b", "shutdown-b", "OnStop")
 }
 
 // TestOnStopReceivesDeadline covers the change from context.Background(): app
@@ -202,6 +229,105 @@ func TestOnStopReceivesDeadline(t *testing.T) {
 
 	if !app.stopHadDeadline() {
 		t.Error("OnStop received a context with no deadline")
+	}
+}
+
+// TestSlowServerDoesNotStarveOthers is the regression test for the sequential
+// drain. A gRPC server with an open stream, or an SSE connection, consumes its
+// whole budget on every shutdown; when servers drained one after another that
+// left nothing for the ones behind it, and requests that would have finished
+// were cut off instead. Draining concurrently means a stuck server costs the
+// others nothing.
+func TestSlowServerDoesNotStarveOthers(t *testing.T) {
+	log := &eventLog{}
+	app := &fakeApp{events: log}
+	quick := &fakeServer{name: "quick", events: log}
+	stuck := &fakeServer{name: "stuck", events: log, blockShutdown: true}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		// stuck is listed last, so the old reverse-order drain reached it first
+		// and quick was the one left with nothing.
+		done <- run(ctx, app, config.BaseConfig{HTTPPort: freePort(t), HealthPort: freePort(t)},
+			Options{
+				Logger:          quietLogger(),
+				Servers:         []Server{quick, stuck},
+				ShutdownTimeout: time.Second,
+			})
+	}()
+
+	waitFor(t, func() bool { return log.contains("start-stuck") })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run returned %v", err)
+	}
+
+	if budget := quick.drainBudget(); budget <= 0 {
+		t.Fatalf("quick was handed an already-expired context (%s left); a stuck server starved it", budget)
+	}
+	if !log.contains("shutdown-quick") {
+		t.Error("quick never drained")
+	}
+	if !log.contains("shutdown-timeout-stuck") {
+		t.Error("stuck was expected to burn its whole budget")
+	}
+}
+
+// TestOnStopKeepsBudgetAfterExhaustedDrain: a server that uses the entire drain
+// must not leave app cleanup with a dead context. For a gRPC service with a
+// streaming endpoint this is every deploy, not a rare case — an open stream
+// never drains on its own — so OnStop silently getting zero time would mean
+// metrics never flushed and connections never closed.
+func TestOnStopKeepsBudgetAfterExhaustedDrain(t *testing.T) {
+	log := &eventLog{}
+	app := &fakeApp{events: log}
+	stuck := &fakeServer{name: "stuck", events: log, blockShutdown: true}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, app, config.BaseConfig{HTTPPort: freePort(t), HealthPort: freePort(t)},
+			Options{
+				Logger:          quietLogger(),
+				Servers:         []Server{stuck},
+				ShutdownTimeout: time.Second,
+				OnStopTimeout:   200 * time.Millisecond,
+			})
+	}()
+
+	waitFor(t, func() bool { return log.contains("start-stuck") })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run returned %v", err)
+	}
+
+	budget := app.stopBudget()
+	if budget <= 0 {
+		t.Fatalf("OnStop got an expired context (%s left) after a server used the whole drain", budget)
+	}
+	if budget > 200*time.Millisecond {
+		t.Errorf("OnStop budget %s exceeds the reserve it should have been floored at", budget)
+	}
+}
+
+// TestOnStopTimeoutMustFitInsideShutdownTimeout: the reserve is carved out of
+// the drain budget rather than added to it, so a reserve at least as large as
+// the whole budget leaves servers no time at all. Reject it at startup rather
+// than at the deploy that discovers it.
+func TestOnStopTimeoutMustFitInsideShutdownTimeout(t *testing.T) {
+	log := &eventLog{}
+	app := &fakeApp{events: log}
+
+	err := run(context.Background(), app,
+		config.BaseConfig{HTTPPort: freePort(t), HealthPort: freePort(t)},
+		Options{Logger: quietLogger(), ShutdownTimeout: time.Second, OnStopTimeout: time.Second})
+
+	if err == nil {
+		t.Fatal("an OnStopTimeout equal to ShutdownTimeout was accepted")
+	}
+	if log.contains("OnStart") {
+		t.Error("the app was started before the bad configuration was rejected")
 	}
 }
 

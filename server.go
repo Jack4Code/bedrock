@@ -40,6 +40,9 @@ type Server interface {
 	// finishes or ctx expires, whichever happens first. It must return when ctx
 	// expires rather than waiting indefinitely — a Shutdown that can hang turns
 	// a routine deploy into a stuck one.
+	//
+	// Servers are drained concurrently, so Shutdown must not assume any other
+	// server is still up or already down.
 	Shutdown(ctx context.Context) error
 }
 
