@@ -113,6 +113,31 @@ bedrock.RunWithOptions(app, cfg, bedrock.Options{
 
 Whatever you pick, both phases have to fit inside your orchestrator's kill timeout — bedrock signals cleanup, it does not outrank SIGKILL.
 
+## Middleware
+
+A `Route` can list its own `Middleware`, and `Options.Middleware` applies to every route this process registers:
+
+```go
+bedrock.RunWithOptions(app, cfg, bedrock.Options{
+    Middleware: []bedrock.Middleware{requireEdgeToken(secret)},
+})
+```
+
+Globals run **outside** per-route middleware — the chain is globals, in the order given, then the route's own, then the handler.
+
+The reason to reach for this rather than adding a middleware to each route is that a check applied per route is missing from the next route somebody adds. For a header injected by a reverse proxy and validated by the backend — so a request that reached the process without transiting the proxy is dropped — that is the entire failure mode being defended against. Bedrock provides the hook; the check itself belongs in your service.
+
+Four boundaries, each deliberate:
+
+| | |
+|---|---|
+| **Health endpoints** | Excluded. `/health`, `/ready` and `/live` never enter the chain, so a global that rejects unauthenticated requests cannot fail your liveness probes — and an orchestrator whose probes fail restarts the task indefinitely. |
+| **Loopback subrouter** | Included. `TrustLoopback` matches on the client-supplied `Host` header, so a global that skipped it could be stepped around with `Host: localhost`. |
+| **OPTIONS preflight** | Bypassed. A browser cannot attach credentials to a preflight, so gating it breaks CORS for legitimate clients. The cost is that `OPTIONS` returns 200 for any registered path regardless of the global, so it can be used to enumerate which paths exist. |
+| **CORS** | Stays outermost. A rejected request still carries CORS headers, so a browser sees the status rather than an opaque network error. |
+
+Unlike `Serve` and `RunJobs` there is no env var override: middleware is code, not configuration.
+
 ## What else is in the box
 
 - **Health endpoints** — `/health`, `/ready`, `/live`. On their own port, or merged into the main server when `HTTPPort == HealthPort`, which is what single-port platforms need. See [HEALTH.md](HEALTH.md).
@@ -121,7 +146,8 @@ Whatever you pick, both phases have to fit inside your orchestrator's kill timeo
 - **Route visibility** — every `Route` declares `Public`, `Gated` or `Private`, which selects the hostname it registers under. The zero value is `Private`, so forgetting to set one produces a 404 on the public surface rather than a leak. `Options.Serve` (or `BEDROCK_SERVE`) narrows a process to a subset, so the same image runs as separate task groups that each own part of the surface.
 - **Scheduled jobs** — implement `JobsProvider` and bedrock runs a cron loop within the lifecycle. `Options.RunJobs` / `BEDROCK_RUN_JOBS` keeps them to one process in a split deployment.
 - **CORS** — permissive by default for development, configurable per service, with OPTIONS preflight handled. See [CORS.md](CORS.md).
-- **Helpers** — JSON decode/encode, multipart uploads, JWT issue/validate, bcrypt password hashing, per-route middleware chaining. Thin wrappers, not a framework of their own.
+- **Middleware** — per-route via `Route.Middleware`, or once for every route via `Options.Middleware` so a cross-cutting check cannot be forgotten on the next route added. See [above](#middleware).
+- **Helpers** — JSON decode/encode, multipart uploads, JWT issue/validate, bcrypt password hashing. Thin wrappers, not a framework of their own.
 - **gRPC** — a supervised gRPC server with the health service wired to bedrock's readiness. See [GRPC.md](GRPC.md).
 
 ## Documentation

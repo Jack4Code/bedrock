@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.6.0
+
+Adds global middleware. Additive and backwards compatible: nothing changes for a service that does not set the new field, and there is no upgrade checklist.
+
+### Added
+
+- **`Options.Middleware`** — middleware applied to every application route this process registers, without each `Route` having to list it. It runs outside per-route middleware: globals first, in the order given, then the route's own, then the handler. A route that declares no `Middleware` of its own still gets them.
+
+  It exists for checks that must not be forgettable. The motivating case is an edge token — a secret header injected by a reverse proxy and validated by the backend, so a request that reached the process without transiting the proxy is dropped. Applied per route, such a check is missing from the next route somebody adds, which is precisely the failure it defends against. **Bedrock ships the hook only**; the check itself belongs in the service.
+
+  Four boundaries, each deliberate and each covered by a test:
+
+  | | |
+  |---|---|
+  | health endpoints | **excluded** — `/health`, `/ready` and `/live` are registered as raw handlers and never enter the chain, so a global that rejects unauthenticated requests cannot fail liveness probes. An orchestrator whose probes fail restarts the task indefinitely, which would make adding an edge token check an outage rather than a control. |
+  | loopback subrouter | **included** — `HostConfig.TrustLoopback` matches on the client-supplied `Host` header, so a global that did not apply there could be stepped around by any remote caller sending `Host: localhost`. |
+  | `OPTIONS` preflight | **bypassed** — preflight is answered by a separate raw handler, because a browser cannot attach credentials to a preflight and gating it breaks CORS for legitimate clients. The consequence is that `OPTIONS` returns 200 for any registered path regardless of what the global would decide, so it can be used to enumerate which paths exist. That is the accepted trade, not an oversight. |
+  | CORS | **stays outermost** — globals run inside it, so a rejected request still carries CORS headers and a browser sees the status rather than an opaque network error. |
+
+  There is no env var override, unlike `Serve` and `RunJobs`: middleware is code, not configuration.
+
+### Unchanged
+
+`Route`, per-route middleware semantics, `Chain`, and every other part of the API. A nil or empty `Options.Middleware` — which is every existing service — produces exactly the behaviour of v0.5.0.
+
+### Module versions
+
+| module | tag | requires |
+|---|---|---|
+| `github.com/Jack4Code/bedrock` | `v0.6.0` | — |
+| `github.com/Jack4Code/bedrock/grpc` | `grpc/v0.1.0` (unchanged) | `bedrock >= v0.5.0` |
+
+The gRPC module needs nothing from this release, so its `require` stays where it is and it does not need retagging. See [RELEASING.md](RELEASING.md).
+
+---
+
 ## v0.5.0
 
 Adds `github.com/Jack4Code/bedrock/grpc`, a second module that runs gRPC servers under bedrock's lifecycle, and changes how the shutdown budget is spent to make that work.
