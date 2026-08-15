@@ -60,6 +60,46 @@ type Options struct {
 	Logger *slog.Logger // optional; defaults to slog.Default()
 	Hosts  HostConfig   // optional; if zero, host matching is skipped (dev mode)
 
+	// Middleware wraps every application route this process registers, without
+	// each Route having to list it. It runs outside any per-route Middleware —
+	// the chain is Chain(handler, append(globals, route...)...) — so globals
+	// execute first, in the order given, and a route with no Middleware of its
+	// own still gets them.
+	//
+	// It exists for cross-cutting checks that must not be forgettable. The
+	// motivating case is an edge token: a secret header injected by a reverse
+	// proxy and validated here, so a request that reached the process without
+	// transiting the proxy is dropped. Applied per route, a check like that is
+	// missing from the next route somebody adds — which is precisely the
+	// failure it defends against. Being a property of the server rather than of
+	// each route is the whole of its value.
+	//
+	// Four boundaries, each deliberate:
+	//
+	//   - Health endpoints are excluded. When HTTPPort == HealthPort, /health,
+	//     /ready and /live are registered as raw handlers and never enter this
+	//     chain. A global that rejects unauthenticated requests would otherwise
+	//     fail every liveness probe, and an orchestrator whose probes fail
+	//     restarts the task indefinitely.
+	//   - The loopback subrouter is included. HostConfig.TrustLoopback matches
+	//     on the Host header, which the client supplies; a global that did not
+	//     apply there could be skipped by any remote caller sending
+	//     "Host: localhost", turning this field into a way around itself.
+	//   - OPTIONS preflight bypasses it. Preflight is answered by a separate
+	//     raw handler, because routing it through an auth-style global breaks
+	//     CORS for legitimate browsers, which cannot attach credentials to a
+	//     preflight. The consequence is that OPTIONS returns 200 for any
+	//     registered path regardless of what the global middleware would
+	//     decide, so it can be used to enumerate which paths exist. That is the
+	//     accepted trade.
+	//   - CORS remains outermost. Globals run inside it, so a rejected request
+	//     still carries CORS headers and a browser sees the status rather than
+	//     an opaque network error.
+	//
+	// Unlike Serve and RunJobs there is no env var override: middleware is
+	// code, not configuration.
+	Middleware []Middleware
+
 	// Serve restricts which visibilities this process registers routes for.
 	// An empty slice (the default) serves every visibility, preserving the
 	// single-process behaviour. A non-empty slice serves only the listed
@@ -395,7 +435,7 @@ func run(ctx context.Context, app App, cfg config.BaseConfig, opts Options) erro
 	servers := make([]Server, 0, len(opts.Servers)+1)
 	switch {
 	case len(routes) > 0:
-		handler := buildRouter(routes, served, opts.Hosts, healthStatus, mergeServers, corsConfig, logger)
+		handler := buildRouter(routes, served, opts.Hosts, opts.Middleware, healthStatus, mergeServers, corsConfig, logger)
 		servers = append(servers, newHTTPServer("http", ":"+strconv.Itoa(cfg.HTTPPort), handler, logger))
 	case mergeServers:
 		// No application routes, but the health endpoints live on this port and
@@ -453,6 +493,7 @@ func buildRouter(
 	routes []Route,
 	served serveSet,
 	hosts HostConfig,
+	globalMiddleware []Middleware,
 	healthStatus *HealthStatus,
 	mergeServers bool,
 	corsConfig CORSConfig,
@@ -494,10 +535,17 @@ func buildRouter(
 			continue
 		}
 
-		// Apply middleware if present
+		// Global middleware wraps the route's own, so it runs first and applies
+		// even to a route that declares none — see Options.Middleware. The
+		// chain is copied rather than appended onto globalMiddleware in place,
+		// which would let one route's middleware leak into the next route's
+		// chain through a shared backing array.
 		handler := r.Handler
-		if len(r.Middleware) > 0 {
-			handler = Chain(handler, r.Middleware...)
+		if len(globalMiddleware)+len(r.Middleware) > 0 {
+			chain := make([]Middleware, 0, len(globalMiddleware)+len(r.Middleware))
+			chain = append(chain, globalMiddleware...)
+			chain = append(chain, r.Middleware...)
+			handler = Chain(handler, chain...)
 		}
 
 		handlerFunc := func(w http.ResponseWriter, req *http.Request) {
@@ -509,7 +557,12 @@ func buildRouter(
 		}
 
 		optionsFunc := func(w http.ResponseWriter, req *http.Request) {
-			// Preflight requests just return 200 OK with CORS headers
+			// Preflight requests just return 200 OK with CORS headers. This is
+			// a raw handler and never enters the middleware chain, so neither
+			// per-route nor global middleware sees an OPTIONS request — a
+			// browser cannot attach credentials to a preflight, so gating it on
+			// an auth-style check would break CORS for legitimate clients. See
+			// Options.Middleware for what that concedes.
 			w.WriteHeader(http.StatusOK)
 		}
 
