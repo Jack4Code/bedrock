@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Server is a long-running component bedrock supervises alongside the HTTP
@@ -58,10 +59,42 @@ type httpServer struct {
 	addr net.Addr
 }
 
+// readHeaderTimeout bounds how long a client may take to send its request
+// headers. Without it, a client that trickles headers a byte at a time
+// (Slowloris) holds a connection and a goroutine open indefinitely, and enough
+// of them exhaust the process's file descriptors.
+//
+// The clock starts when the server begins waiting for a request: at accept
+// for the first request on a connection, so a connection that sends nothing
+// is dropped too, and at the first byte for later requests on a keep-alive
+// connection, whose wait in between is idleTimeout's job. net/http lifts it
+// as soon as the headers are read, so it never touches a slow request body or
+// a running handler — and so cannot cancel a request context, which
+// serveRoute's disconnect log depends on (see
+// TestHTTPServerCannotCancelRequestContexts). Ten seconds is far beyond what a
+// legitimate client needs to send a few hundred bytes of headers.
+const readHeaderTimeout = 10 * time.Second
+
+// idleTimeout bounds how long a keep-alive connection may sit open between
+// requests. Without it — and with no ReadTimeout to fall back on — a client
+// can make one request and then hold the connection idle forever.
+//
+// net/http applies it only while waiting for the next request on a
+// connection, never while one is being read or handled, so like
+// readHeaderTimeout it cannot cancel a request context. Two minutes keeps
+// connections warm for clients that reuse them without letting abandoned ones
+// pile up.
+const idleTimeout = 2 * time.Minute
+
 func newHTTPServer(name, addr string, handler http.Handler, logger *slog.Logger) *httpServer {
 	return &httpServer{
-		name:   name,
-		srv:    &http.Server{Addr: addr, Handler: handler},
+		name: name,
+		srv: &http.Server{
+			Addr:              addr,
+			Handler:           handler,
+			ReadHeaderTimeout: readHeaderTimeout,
+			IdleTimeout:       idleTimeout,
+		},
 		logger: logger,
 	}
 }
