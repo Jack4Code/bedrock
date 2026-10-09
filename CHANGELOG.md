@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Logs requests whose connection closed before the handler finished, and puts a deadline on reading request headers. No API change; the visible differences are one new log line, one skipped write, and slow-header connections being dropped, all described below.
+Logs requests whose connection closed before the handler finished, and puts deadlines on reading request headers and on idle keep-alive connections. No API change; the visible differences are one new log line, one skipped write, and stalled or idle connections being dropped, all described below.
 
 ### Changed
 
@@ -12,7 +12,9 @@ Logs requests whose connection closed before the handler finished, and puts a de
 
 - **No `500` fallback for a disconnected client.** When `Response.Write` fails and the request context is already cancelled, bedrock no longer calls `http.Error`, since there is no one to receive it. `Response.Write` is still called, so a custom `Response` that releases resources in `Write` is unaffected.
 
-- **Request headers must arrive within 10 seconds.** bedrock's HTTP servers (the app router and the health server) now set `ReadHeaderTimeout`. Until now a client could open a connection, send a partial request line and stall, holding a connection and a goroutine forever; enough of them exhaust the process's file descriptors (Slowloris). The clock starts at the first byte of a request and stops once the headers are read, so it does not limit request bodies, handler run time or idle keep-alive connections, and it cannot cancel a request context. No legitimate client takes 10 seconds to send its headers, but the value is fixed: a service whose clients genuinely need longer would need it made configurable first.
+- **Request headers must arrive within 10 seconds.** bedrock's HTTP servers (the app router and the health server) now set `ReadHeaderTimeout`. Until now a client could open a connection, send a partial request line and stall, holding a connection and a goroutine forever; enough of them exhaust the process's file descriptors (Slowloris). The clock starts when the connection is accepted (for later requests on a keep-alive connection, at their first byte) and stops once the headers are read, so a connection that sends nothing at all is dropped too, but request bodies and handler run time are not limited and no request context can be cancelled by it. No legitimate client takes 10 seconds to send its headers, but the value is fixed: a service whose clients genuinely need longer would need it made configurable first.
+
+- **Idle keep-alive connections are closed after 2 minutes.** bedrock's HTTP servers now set `IdleTimeout`. With neither it nor `ReadTimeout` set, a client could make one request and then hold the connection open indefinitely. It applies only between requests on a connection, never while one is being read or handled, so long-running handlers are unaffected and no request context can be cancelled by it. Clients that reuse connections simply reconnect after a quiet spell. Fixed, like the header timeout.
 
 ## v0.6.0
 
