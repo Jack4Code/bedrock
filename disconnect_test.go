@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -163,5 +164,98 @@ func TestServeRouteNormalRequestIsQuiet(t *testing.T) {
 	}
 	if logs.String() != "" {
 		t.Errorf("expected no logs, got:\n%s", logs.String())
+	}
+}
+
+// TestHTTPServerCannotCancelRequestContexts guards the assumption serveRoute's
+// disconnect log rests on: that a cancelled request context means the peer
+// closed the connection, never that bedrock did. Each field checked here would
+// let the server cancel a request context of its own accord — a base or
+// connection context bedrock cancels, or a read/write deadline that fails the
+// connection mid-handler. If one of them is now set on purpose, serveRoute's
+// log line is no longer true and has to change with it; update both together.
+//
+// ReadHeaderTimeout is deliberately not checked: net/http lifts that deadline
+// once the headers are read, so it cannot cancel a running handler, and it is
+// the setting worth adding against slow-header clients.
+func TestHTTPServerCannotCancelRequestContexts(t *testing.T) {
+	srv := newHTTPServer("http", "127.0.0.1:0", http.NewServeMux(), quietLogger()).srv
+
+	if srv.BaseContext != nil {
+		t.Error("BaseContext is set: cancelling it would be logged as a client disconnect")
+	}
+	if srv.ConnContext != nil {
+		t.Error("ConnContext is set: cancelling it would be logged as a client disconnect")
+	}
+	if srv.ReadTimeout != 0 {
+		t.Errorf("ReadTimeout = %s: it fails the connection mid-handler, which would be logged as a client disconnect", srv.ReadTimeout)
+	}
+	if srv.WriteTimeout != 0 {
+		t.Errorf("WriteTimeout = %s: it fails the connection mid-handler, which would be logged as a client disconnect", srv.WriteTimeout)
+	}
+}
+
+// TestShutdownDoesNotCancelInFlightRequests is the behavioural half of the
+// guard above: draining must leave in-flight requests' contexts alone. If
+// Shutdown ever force-closes connections (srv.Close, or a drain that cancels
+// handlers), every request it interrupts would be logged as the client's
+// doing.
+func TestShutdownDoesNotCancelInFlightRequests(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	cancelled := make(chan bool, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done():
+			cancelled <- true
+		case <-release:
+			cancelled <- false
+		}
+	})
+
+	srv := newHTTPServer("http", "127.0.0.1:0", mux, quietLogger())
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	addr := srv.boundAddr().String()
+
+	go func() {
+		if resp, err := http.Get("http://" + addr); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-started
+
+	shutdownErr := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		shutdownErr <- srv.Shutdown(ctx)
+	}()
+
+	// Wait until the listener is closed, which proves Shutdown is under way
+	// while the request is still in flight.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err != nil {
+			break
+		}
+		conn.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("listener still accepting connections after Shutdown began")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(release)
+	if <-cancelled {
+		t.Error("Shutdown cancelled an in-flight request's context; serveRoute would log it as a client disconnect")
+	}
+	if err := <-shutdownErr; err != nil {
+		t.Errorf("shutdown: %v", err)
 	}
 }
