@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Server is a long-running component bedrock supervises alongside the HTTP
@@ -58,10 +59,28 @@ type httpServer struct {
 	addr net.Addr
 }
 
+// readHeaderTimeout bounds how long a client may take to send its request
+// headers. Without it, a client that trickles headers a byte at a time
+// (Slowloris) holds a connection and a goroutine open indefinitely, and enough
+// of them exhaust the process's file descriptors.
+//
+// It is the one read deadline bedrock sets. net/http starts it only once the
+// first bytes of a request arrive and lifts it as soon as the headers are
+// read, so it never touches a running handler, a slow request body, or an idle
+// keep-alive connection — and so cannot cancel a request context, which
+// serveRoute's disconnect log depends on (see
+// TestHTTPServerCannotCancelRequestContexts). Ten seconds is far beyond what a
+// legitimate client needs to send a few hundred bytes of headers.
+const readHeaderTimeout = 10 * time.Second
+
 func newHTTPServer(name, addr string, handler http.Handler, logger *slog.Logger) *httpServer {
 	return &httpServer{
-		name:   name,
-		srv:    &http.Server{Addr: addr, Handler: handler},
+		name: name,
+		srv: &http.Server{
+			Addr:              addr,
+			Handler:           handler,
+			ReadHeaderTimeout: readHeaderTimeout,
+		},
 		logger: logger,
 	}
 }

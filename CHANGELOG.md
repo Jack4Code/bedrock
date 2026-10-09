@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Logs requests whose connection closed before the handler finished. No API change; the only visible differences are one new log line and one skipped write, both described below.
+Logs requests whose connection closed before the handler finished, and puts a deadline on reading request headers. No API change; the visible differences are one new log line, one skipped write, and slow-header connections being dropped, all described below.
 
 ### Changed
 
@@ -11,6 +11,8 @@ Logs requests whose connection closed before the handler finished. No API change
   The context only gets cancelled once the request body has been read to EOF; until then net/http is not watching the connection. A handler that wants to stop early, rather than just be logged, should drain the body and then select on `ctx.Done()`.
 
 - **No `500` fallback for a disconnected client.** When `Response.Write` fails and the request context is already cancelled, bedrock no longer calls `http.Error`, since there is no one to receive it. `Response.Write` is still called, so a custom `Response` that releases resources in `Write` is unaffected.
+
+- **Request headers must arrive within 10 seconds.** bedrock's HTTP servers (the app router and the health server) now set `ReadHeaderTimeout`. Until now a client could open a connection, send a partial request line and stall, holding a connection and a goroutine forever; enough of them exhaust the process's file descriptors (Slowloris). The clock starts at the first byte of a request and stops once the headers are read, so it does not limit request bodies, handler run time or idle keep-alive connections, and it cannot cancel a request context. No legitimate client takes 10 seconds to send its headers, but the value is fixed: a service whose clients genuinely need longer would need it made configurable first.
 
 ## v0.6.0
 

@@ -175,9 +175,9 @@ func TestServeRouteNormalRequestIsQuiet(t *testing.T) {
 // connection mid-handler. If one of them is now set on purpose, serveRoute's
 // log line is no longer true and has to change with it; update both together.
 //
-// ReadHeaderTimeout is deliberately not checked: net/http lifts that deadline
-// once the headers are read, so it cannot cancel a running handler, and it is
-// the setting worth adding against slow-header clients.
+// ReadHeaderTimeout is deliberately not checked: bedrock sets it, and net/http
+// lifts that deadline once the headers are read, so it cannot cancel a running
+// handler — TestReadHeaderTimeoutSparesRunningHandlers holds it to that.
 func TestHTTPServerCannotCancelRequestContexts(t *testing.T) {
 	srv := newHTTPServer("http", "127.0.0.1:0", http.NewServeMux(), quietLogger()).srv
 
