@@ -69,7 +69,7 @@ func TestGlobalMiddlewareAppliesWithoutRouteMiddleware(t *testing.T) {
 	}}
 
 	h := buildRouter(routes, nil, HostConfig{}, []Middleware{recordingMiddleware("global", &order)},
-		NewHealthStatus(), false, DefaultCORSConfig(), quietLogger())
+		NewHealthStatus(), false, DefaultCORSConfig(), nil, quietLogger())
 
 	if got := getStatus(t, h, "example.com", "/widgets"); got != http.StatusOK {
 		t.Fatalf("GET /widgets: got %d, want %d", got, http.StatusOK)
@@ -93,7 +93,7 @@ func TestGlobalMiddlewareRunsBeforeRouteMiddleware(t *testing.T) {
 	}}
 
 	h := buildRouter(routes, nil, HostConfig{}, []Middleware{recordingMiddleware("global", &order)},
-		NewHealthStatus(), false, DefaultCORSConfig(), quietLogger())
+		NewHealthStatus(), false, DefaultCORSConfig(), nil, quietLogger())
 
 	if got := getStatus(t, h, "example.com", "/widgets"); got != http.StatusOK {
 		t.Fatalf("GET /widgets: got %d, want %d", got, http.StatusOK)
@@ -121,7 +121,7 @@ func TestGlobalMiddlewareExecutesInOrderGiven(t *testing.T) {
 		recordingMiddleware("third", &order),
 	}
 	h := buildRouter(routes, nil, HostConfig{}, globals,
-		NewHealthStatus(), false, DefaultCORSConfig(), quietLogger())
+		NewHealthStatus(), false, DefaultCORSConfig(), nil, quietLogger())
 
 	if got := getStatus(t, h, "example.com", "/widgets"); got != http.StatusOK {
 		t.Fatalf("GET /widgets: got %d, want %d", got, http.StatusOK)
@@ -152,7 +152,7 @@ func TestNoGlobalMiddlewareChangesNothing(t *testing.T) {
 			}}
 
 			h := buildRouter(routes, nil, HostConfig{}, c.globals,
-				NewHealthStatus(), false, DefaultCORSConfig(), quietLogger())
+				NewHealthStatus(), false, DefaultCORSConfig(), nil, quietLogger())
 
 			if got := getStatus(t, h, "example.com", "/widgets"); got != http.StatusOK {
 				t.Fatalf("GET /widgets: got %d, want %d", got, http.StatusOK)
@@ -178,7 +178,7 @@ func TestGlobalMiddlewareCanShortCircuit(t *testing.T) {
 	}}
 
 	h := buildRouter(routes, nil, HostConfig{}, []Middleware{rejectingMiddleware()},
-		NewHealthStatus(), false, DefaultCORSConfig(), quietLogger())
+		NewHealthStatus(), false, DefaultCORSConfig(), nil, quietLogger())
 
 	if got := getStatus(t, h, "example.com", "/widgets"); got != http.StatusForbidden {
 		t.Fatalf("GET /widgets: got %d, want %d", got, http.StatusForbidden)
@@ -208,7 +208,7 @@ func TestGlobalMiddlewareSkipsHealthEndpoints(t *testing.T) {
 
 	// mergeServers = true: health endpoints share the application router.
 	h := buildRouter(routes, nil, HostConfig{}, []Middleware{rejectingMiddleware()},
-		health, true, DefaultCORSConfig(), quietLogger())
+		health, true, DefaultCORSConfig(), nil, quietLogger())
 
 	for _, path := range []string{"/health", "/ready", "/live"} {
 		if got := getStatus(t, h, "example.com", path); got != http.StatusOK {
@@ -238,7 +238,7 @@ func TestGlobalMiddlewareAppliesToLoopbackSubrouter(t *testing.T) {
 	}}
 
 	h := buildRouter(routes, nil, hosts, []Middleware{rejectingMiddleware()},
-		NewHealthStatus(), false, DefaultCORSConfig(), quietLogger())
+		NewHealthStatus(), false, DefaultCORSConfig(), nil, quietLogger())
 
 	for _, host := range []string{"localhost:8080", "127.0.0.1:8080", publicHost} {
 		if got := getStatus(t, h, host, "/widgets"); got != http.StatusForbidden {
@@ -263,7 +263,7 @@ func TestGlobalMiddlewareDoesNotApplyToPreflight(t *testing.T) {
 	}}
 
 	h := buildRouter(routes, nil, HostConfig{}, []Middleware{rejectingMiddleware()},
-		NewHealthStatus(), false, DefaultCORSConfig(), quietLogger())
+		NewHealthStatus(), false, DefaultCORSConfig(), nil, quietLogger())
 
 	req := httptest.NewRequest(http.MethodOptions, "http://example.com/widgets", nil)
 	req.Host = "example.com"
@@ -287,7 +287,7 @@ func TestGlobalMiddlewareSurvivesCORS(t *testing.T) {
 	}}
 
 	h := buildRouter(routes, nil, HostConfig{}, []Middleware{rejectingMiddleware()},
-		NewHealthStatus(), false, DefaultCORSConfig(), quietLogger())
+		NewHealthStatus(), false, DefaultCORSConfig(), nil, quietLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/widgets", nil)
 	req.Host = "example.com"
@@ -313,7 +313,7 @@ func TestGlobalMiddlewareNotAppliedToSkippedRoutes(t *testing.T) {
 	}
 
 	h := buildRouter(routes, serveSet{Public: true}, HostConfig{}, []Middleware{recordingMiddleware("global", &order)},
-		NewHealthStatus(), false, DefaultCORSConfig(), quietLogger())
+		NewHealthStatus(), false, DefaultCORSConfig(), nil, quietLogger())
 
 	if got := getStatus(t, h, "example.com", "/priv"); got != http.StatusNotFound {
 		t.Errorf("GET /priv: got %d, want %d", got, http.StatusNotFound)
