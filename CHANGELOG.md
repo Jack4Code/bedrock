@@ -2,11 +2,11 @@
 
 ## Unreleased
 
-Logs requests whose client hung up before the handler finished. No API change; the only visible differences are one new log line and one skipped write, both described below.
+Logs requests whose connection closed before the handler finished. No API change; the only visible differences are one new log line and one skipped write, both described below.
 
 ### Changed
 
-- **A handler that returns after its client disconnected is now logged** at `Warn`: `client disconnected before response was written`, with `method`, `path`, `elapsed` and `reason`. net/http cancels the request context when the client goes away, but it cannot stop a handler that never checks it — the handler runs to completion and its response goes into a dead connection with no trace on the server side. That matters most for long-running endpoints whose caller has a timeout and retries (webhook senders, mostly): the caller records a failure for work that was actually done, and the retry does it again. The log line is how a service finds out.
+- **A handler that returns after its connection closed is now logged** at `Warn`: `connection closed before response was written`, with `method`, `path`, `remote_addr` and `elapsed`. The peer that closed it may be a proxy or load balancer timing out rather than the end client; `remote_addr` tells the two apart. net/http cancels the request context when the client goes away, but it cannot stop a handler that never checks it — the handler runs to completion and its response goes into a dead connection with no trace on the server side. That matters most for long-running endpoints whose caller has a timeout and retries (webhook senders, mostly): the caller records a failure for work that was actually done, and the retry does it again. The log line is how a service finds out.
 
   The context only gets cancelled once the request body has been read to EOF; until then net/http is not watching the connection. A handler that wants to stop early, rather than just be logged, should drain the body and then select on `ctx.Done()`.
 

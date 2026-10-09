@@ -45,7 +45,7 @@ func (r failingResponse) Write(ctx context.Context, w http.ResponseWriter) error
 	return errors.New("write failed")
 }
 
-const disconnectMsg = "client disconnected before response was written"
+const disconnectMsg = "connection closed before response was written"
 
 // ---------------------------------------------------------------------------
 // tests
@@ -91,6 +91,9 @@ func TestServeRouteLogsClientDisconnect(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "path=/slow") {
 		t.Errorf("disconnect log is missing the path; logs:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "remote_addr=127.0.0.1:") {
+		t.Errorf("disconnect log is missing the peer address; logs:\n%s", logs.String())
 	}
 }
 

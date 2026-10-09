@@ -620,13 +620,15 @@ func buildRouter(
 // serveRoute adapts a bedrock Handler to net/http: it runs the handler with
 // the request context and writes the Response it returns.
 //
-// net/http cancels the request context when the client goes away, but it
+// net/http cancels the request context when the connection closes, but it
 // cannot stop a handler that never looks at it — the handler runs to
 // completion and its response is written into a dead connection, where it
 // vanishes. That is invisible from the server side, so serveRoute logs it: a
 // handler that finishes after its caller hung up (a webhook sender that timed
 // out, a browser that navigated away) is worth knowing about, because the
-// caller will often retry work that has in fact already been done.
+// caller will often retry work that has in fact already been done. The peer
+// may be a proxy rather than the end client — a load balancer's own timeout
+// looks identical — which is why remote_addr is logged.
 //
 // Response.Write is still called in that case, so a Response that releases
 // resources in Write keeps doing so; only the 500 fallback is skipped, since
@@ -637,12 +639,21 @@ func serveRoute(handler Handler, logger *slog.Logger) http.HandlerFunc {
 		start := time.Now()
 		response := handler(ctx, req)
 
-		if err := ctx.Err(); err != nil {
-			logger.Warn("client disconnected before response was written",
+		// While ServeHTTP is still running, net/http cancels this context only
+		// when a read or write on the connection fails, so a cancelled context
+		// here means the peer closed the connection or the network broke. That
+		// holds only because bedrock's http.Server (newHTTPServer) sets no
+		// BaseContext, ConnContext, ReadTimeout or WriteTimeout and never calls
+		// Close, and because middleware cannot replace req's context. Add any of
+		// those and this branch also fires for cancellations bedrock caused,
+		// and the log line below stops being true. ctx.Err() is not logged: it
+		// is always context.Canceled, and net/http sets no cause.
+		if ctx.Err() != nil {
+			logger.Warn("connection closed before response was written",
 				"method", req.Method,
 				"path", req.URL.Path,
+				"remote_addr", req.RemoteAddr,
 				"elapsed", time.Since(start),
-				"reason", err,
 			)
 			_ = response.Write(ctx, w)
 			return
