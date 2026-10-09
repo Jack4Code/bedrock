@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.7.0
 
 Logs requests whose connection closed before the handler finished, and puts deadlines on reading request headers and on idle keep-alive connections. No API change; the visible differences are one new log line, one skipped write, and stalled or idle connections being dropped, all described below.
 
@@ -15,6 +15,17 @@ Logs requests whose connection closed before the handler finished, and puts dead
 - **Request headers must arrive within 10 seconds.** bedrock's HTTP servers (the app router and the health server) now set `ReadHeaderTimeout`. Until now a client could open a connection, send a partial request line and stall, holding a connection and a goroutine forever; enough of them exhaust the process's file descriptors (Slowloris). The clock starts when the connection is accepted (for later requests on a keep-alive connection, at their first byte) and stops once the headers are read, so a connection that sends nothing at all is dropped too, but request bodies and handler run time are not limited and no request context can be cancelled by it. No legitimate client takes 10 seconds to send its headers, but the value is fixed: a service whose clients genuinely need longer would need it made configurable first.
 
 - **Idle keep-alive connections are closed after 2 minutes.** bedrock's HTTP servers now set `IdleTimeout`. With neither it nor `ReadTimeout` set, a client could make one request and then hold the connection open indefinitely. It applies only between requests on a connection, never while one is being read or handled, so long-running handlers are unaffected and no request context can be cancelled by it. Clients that reuse connections simply reconnect after a quiet spell. Fixed, like the header timeout.
+
+### Module versions
+
+| module | tag | requires |
+|---|---|---|
+| `github.com/Jack4Code/bedrock` | `v0.7.0` | — |
+| `github.com/Jack4Code/bedrock/grpc` | `grpc/v0.1.0` (unchanged) | `bedrock >= v0.5.0` |
+
+The gRPC module needs nothing from this release, so its `require` stays where it is and it does not need retagging. See [RELEASING.md](RELEASING.md).
+
+---
 
 ## v0.6.0
 
