@@ -19,8 +19,8 @@ func TestIsLoopbackHost(t *testing.T) {
 		{"127.0.0.1:8080", true},
 		{"::1", true},
 		{"[::1]:8080", true},
-		{"api-dev.speechbag.com", false},
-		{"api-dev.speechbag.com:8080", false},
+		{"api-dev.example.com", false},
+		{"api-dev.example.com:8080", false},
 		{"localhost.evil.com", false},
 		{"127.0.0.1.evil.com", false},
 		{"", false},
@@ -40,7 +40,7 @@ func TestIsLoopbackHost(t *testing.T) {
 // its visibility host AND on the loopback subrouter is reachable via the gated
 // host and via localhost, but not via an unrelated external host.
 func TestLoopbackSubrouterRouting(t *testing.T) {
-	const gatedHost = "api-dev.speechbag.com"
+	const gatedHost = "api-dev.example.com"
 
 	router := mux.NewRouter()
 	handler := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) }
@@ -53,10 +53,10 @@ func TestLoopbackSubrouterRouting(t *testing.T) {
 		host string
 		want int
 	}{
-		{"localhost:8080", http.StatusTeapot},                 // co-located SSR caller
-		{"127.0.0.1:8080", http.StatusTeapot},                 // co-located, IP form
-		{gatedHost, http.StatusTeapot},                        // external via reverse proxy
-		{"api-dev.public.speechbag.com", http.StatusNotFound}, // wrong host => no match
+		{"localhost:8080", http.StatusTeapot},               // co-located SSR caller
+		{"127.0.0.1:8080", http.StatusTeapot},               // co-located, IP form
+		{gatedHost, http.StatusTeapot},                      // external via reverse proxy
+		{"api-dev.public.example.com", http.StatusNotFound}, // wrong host => no match
 	}
 
 	for _, c := range cases {
