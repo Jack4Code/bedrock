@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+Adds `bedrock.After`. Additive and backwards compatible: a service that never calls it behaves exactly as on v0.7.0, and there is no upgrade checklist.
+
+### Added
+
+- **`bedrock.After(ctx, fn)`** — runs `fn` once the handler has returned and its response has been written, so the caller is not kept waiting for work its answer does not depend on. **It is best-effort:** the work runs in-process after the caller was told the request succeeded, so a crash or a shutdown deadline loses it silently. Use it for work whose loss is tolerable, or as the fast path in front of something durable. [AFTER.md](AFTER.md) has the full semantics and the webhook pattern (persist, `202 Accepted`, process in `After`, sweep with a job) that makes it safe for work that must happen.
+
+  What bedrock adds over a bare `go func()`: the task's context keeps the request's values without its cancellation; shutdown drains tasks after the servers and **before `OnStop`**, so a database pool `OnStop` closes is still open while they finish; panics are recovered and logged; and concurrency is capped, with tasks past the cap dropped and logged rather than queued.
+
+  Four deliberate boundaries, each covered by a test: tasks still run if the client disconnected, since the handler did its part; tasks are discarded if the handler panics; `After` returns `ErrAfterUnavailable` outside a bedrock request or once the handler has returned, rather than accepting a task it will never run; and the drain is bounded by the server phase of `ShutdownTimeout`, after which still-running tasks are cancelled and abandoned.
+
+- **`Options.AfterLimit`** — how many requests' `After` tasks may run at once. Zero means `DefaultAfterLimit` (100). No effect on a service that never calls `After`.
+
+### Unchanged
+
+`Route`, `Handler`, `Response`, middleware, and every existing `Options` field. The exported API only gains `After`, `ErrAfterUnavailable`, `DefaultAfterLimit` and `Options.AfterLimit`. Per request, the handler now receives a child of the request context carrying an empty task list; it has the same values, deadline and cancellation as before.
+
+### Module versions
+
+| module | tag | requires |
+|---|---|---|
+| `github.com/Jack4Code/bedrock` | next minor | — |
+| `github.com/Jack4Code/bedrock/grpc` | `grpc/v0.1.0` (unchanged) | `bedrock >= v0.5.0` |
+
+---
+
+## v0.7.0
+
 Logs requests whose connection closed before the handler finished, and puts deadlines on reading request headers and on idle keep-alive connections. No API change; the visible differences are one new log line, one skipped write, and stalled or idle connections being dropped, all described below.
 
 ### Changed
@@ -15,6 +42,17 @@ Logs requests whose connection closed before the handler finished, and puts dead
 - **Request headers must arrive within 10 seconds.** bedrock's HTTP servers (the app router and the health server) now set `ReadHeaderTimeout`. Until now a client could open a connection, send a partial request line and stall, holding a connection and a goroutine forever; enough of them exhaust the process's file descriptors (Slowloris). The clock starts when the connection is accepted (for later requests on a keep-alive connection, at their first byte) and stops once the headers are read, so a connection that sends nothing at all is dropped too, but request bodies and handler run time are not limited and no request context can be cancelled by it. No legitimate client takes 10 seconds to send its headers, but the value is fixed: a service whose clients genuinely need longer would need it made configurable first.
 
 - **Idle keep-alive connections are closed after 2 minutes.** bedrock's HTTP servers now set `IdleTimeout`. With neither it nor `ReadTimeout` set, a client could make one request and then hold the connection open indefinitely. It applies only between requests on a connection, never while one is being read or handled, so long-running handlers are unaffected and no request context can be cancelled by it. Clients that reuse connections simply reconnect after a quiet spell. Fixed, like the header timeout.
+
+### Module versions
+
+| module | tag | requires |
+|---|---|---|
+| `github.com/Jack4Code/bedrock` | `v0.7.0` | — |
+| `github.com/Jack4Code/bedrock/grpc` | `grpc/v0.1.0` (unchanged) | `bedrock >= v0.5.0` |
+
+The gRPC module needs nothing from this release, so its `require` stays where it is and it does not need retagging. See [RELEASING.md](RELEASING.md).
+
+---
 
 ## v0.6.0
 

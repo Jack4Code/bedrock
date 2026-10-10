@@ -67,7 +67,7 @@ func TestServeRouteLogsClientDisconnect(t *testing.T) {
 		return JSON(http.StatusOK, map[string]string{"ok": "true"})
 	}
 
-	srv := httptest.NewServer(serveRoute(handler, logger))
+	srv := httptest.NewServer(serveRoute(handler, logger, nil))
 	defer srv.Close()
 
 	client := &http.Client{Timeout: 100 * time.Millisecond}
@@ -115,7 +115,7 @@ func TestServeRouteDisconnectSkipsErrorFallback(t *testing.T) {
 	cancel()
 	req := httptest.NewRequest(http.MethodGet, "/gone", nil).WithContext(ctx)
 	rec := httptest.NewRecorder()
-	serveRoute(handler, logger).ServeHTTP(rec, req)
+	serveRoute(handler, logger, nil).ServeHTTP(rec, req)
 
 	if !writeCalled {
 		t.Error("Response.Write was skipped for a disconnected client")
@@ -140,7 +140,7 @@ func TestServeRouteWriteErrorStill500s(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	serveRoute(handler, logger).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	serveRoute(handler, logger, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)
@@ -157,7 +157,7 @@ func TestServeRouteNormalRequestIsQuiet(t *testing.T) {
 
 	var order []string
 	rec := httptest.NewRecorder()
-	serveRoute(okHandler(&order), logger).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	serveRoute(okHandler(&order), logger, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", rec.Code)

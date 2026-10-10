@@ -145,6 +145,7 @@ Unlike `Serve` and `RunJobs` there is no env var override: middleware is code, n
 - **Orchestrator ports** — `GetHTTPPort()`, `GetHealthPort()`, `GetMetricsPort()`, `GetGRPCPort()` each prefer the matching `NOMAD_PORT_*` and fall back to configuration. See [NOMAD.md](NOMAD.md).
 - **Route visibility** — every `Route` declares `Public`, `Gated` or `Private`, which selects the hostname it registers under. The zero value is `Private`, so forgetting to set one produces a 404 on the public surface rather than a leak. `Options.Serve` (or `BEDROCK_SERVE`) narrows a process to a subset, so the same image runs as separate task groups that each own part of the surface.
 - **Scheduled jobs** — implement `JobsProvider` and bedrock runs a cron loop within the lifecycle. `Options.RunJobs` / `BEDROCK_RUN_JOBS` keeps them to one process in a split deployment.
+- **After** — `bedrock.After(ctx, fn)` runs work once the response has been written, drained at shutdown before `OnStop`. Best-effort by design; see [AFTER.md](AFTER.md) for what that means and the webhook pattern that makes it safe.
 - **CORS** — permissive by default for development, configurable per service, with OPTIONS preflight handled. See [CORS.md](CORS.md).
 - **Middleware** — per-route via `Route.Middleware`, or once for every route via `Options.Middleware` so a cross-cutting check cannot be forgotten on the next route added. See [above](#middleware).
 - **Helpers** — JSON decode/encode, multipart uploads, JWT issue/validate, bcrypt password hashing. Thin wrappers, not a framework of their own.
@@ -158,6 +159,7 @@ Unlike `Serve` and `RunJobs` there is no env var override: middleware is code, n
 | [GRPC.md](GRPC.md) | the `bedrock/grpc` module |
 | [HEALTH.md](HEALTH.md) | health endpoints and deployment modes |
 | [NOMAD.md](NOMAD.md) | dynamic ports, job specs, split deployments |
+| [AFTER.md](AFTER.md) | work that runs after the response, and its limits |
 | [CORS.md](CORS.md) | CORS configuration |
 | [LOGGING.md](LOGGING.md) | logging behaviour |
 | [RELEASING.md](RELEASING.md) | tagging the two modules, in the right order |
