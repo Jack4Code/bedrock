@@ -138,6 +138,11 @@ type Options struct {
 	// example. Bedrock creates one when this is nil.
 	Health *HealthStatus
 
+	// AfterLimit caps how many requests' After tasks may run at once; past
+	// it, new tasks are dropped and logged. Zero means DefaultAfterLimit. It
+	// has no effect on a service that never calls After.
+	AfterLimit int
+
 	// ShutdownTimeout bounds the whole drain sequence. Servers drain
 	// concurrently within it, then the health server and the app's OnStop run
 	// with whatever is left — never less than OnStopTimeout. Defaults to
@@ -348,6 +353,10 @@ func run(ctx context.Context, app App, cfg config.BaseConfig, opts Options) erro
 		jobsStarted bool
 	)
 
+	// One runner for every route's After tasks. It costs nothing until a
+	// handler calls After, and draining an empty one returns immediately.
+	after := newAfterRunner(opts.AfterLimit, logger)
+
 	// teardown drains whatever is currently running. Both the normal shutdown
 	// and every startup failure go through it, which is why there is only one
 	// copy of this sequence.
@@ -380,6 +389,12 @@ func run(ctx context.Context, app App, cfg config.BaseConfig, opts Options) erro
 			}()
 		}
 		wg.Wait()
+
+		// After tasks are drained once the servers are, because a request that
+		// finishes during the server drain may still hand tasks off; and before
+		// OnStop, because tasks commonly use what OnStop closes. They get
+		// whatever is left of the server phase, never the OnStop reserve.
+		after.drain(serverCtx)
 		cancelServers()
 
 		// The health server goes down after them, so probes keep answering for
@@ -435,7 +450,7 @@ func run(ctx context.Context, app App, cfg config.BaseConfig, opts Options) erro
 	servers := make([]Server, 0, len(opts.Servers)+1)
 	switch {
 	case len(routes) > 0:
-		handler := buildRouter(routes, served, opts.Hosts, opts.Middleware, healthStatus, mergeServers, corsConfig, logger)
+		handler := buildRouter(routes, served, opts.Hosts, opts.Middleware, healthStatus, mergeServers, corsConfig, after, logger)
 		servers = append(servers, newHTTPServer("http", ":"+strconv.Itoa(cfg.HTTPPort), handler, logger))
 	case mergeServers:
 		// No application routes, but the health endpoints live on this port and
@@ -497,6 +512,7 @@ func buildRouter(
 	healthStatus *HealthStatus,
 	mergeServers bool,
 	corsConfig CORSConfig,
+	after *afterRunner,
 	logger *slog.Logger,
 ) http.Handler {
 	router := mux.NewRouter()
@@ -548,7 +564,7 @@ func buildRouter(
 			handler = Chain(handler, chain...)
 		}
 
-		handlerFunc := serveRoute(handler, logger)
+		handlerFunc := serveRoute(handler, logger, after)
 
 		optionsFunc := func(w http.ResponseWriter, req *http.Request) {
 			// Preflight requests just return 200 OK with CORS headers. This is
@@ -633,11 +649,27 @@ func buildRouter(
 // Response.Write is still called in that case, so a Response that releases
 // resources in Write keeps doing so; only the 500 fallback is skipped, since
 // there is nobody to send it to.
-func serveRoute(handler Handler, logger *slog.Logger) http.HandlerFunc {
+//
+// When after is non-nil, the handler's context accepts After tasks, which are
+// handed to after once the response has been written. A handler that panics
+// never reaches the hand-off, so its tasks are discarded.
+func serveRoute(handler Handler, logger *slog.Logger, after *afterRunner) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
+
+		// The handler gets a child of the request context carrying the After
+		// scope. ctx itself stays the request context: the disconnect check
+		// below depends on nothing but net/http being able to cancel it.
+		handlerCtx := ctx
+		var scope *afterScope
+		if after != nil {
+			scope = &afterScope{}
+			handlerCtx = context.WithValue(ctx, afterScopeKey{}, scope)
+			defer scope.seal()
+		}
+
 		start := time.Now()
-		response := handler(ctx, req)
+		response := handler(handlerCtx, req)
 
 		// While ServeHTTP is still running, net/http cancels this context only
 		// when a read or write on the connection fails, so a cancelled context
@@ -655,12 +687,13 @@ func serveRoute(handler Handler, logger *slog.Logger) http.HandlerFunc {
 				"remote_addr", req.RemoteAddr,
 				"elapsed", time.Since(start),
 			)
-			_ = response.Write(ctx, w)
-			return
+			_ = response.Write(handlerCtx, w)
+		} else if err := response.Write(handlerCtx, w); err != nil {
+			http.Error(w, "Internal Server Error", 500)
 		}
 
-		if err := response.Write(ctx, w); err != nil {
-			http.Error(w, "Internal Server Error", 500)
+		if tasks := scope.seal(); len(tasks) > 0 {
+			after.submit(ctx, req.Method, req.URL.Path, tasks)
 		}
 	}
 }
