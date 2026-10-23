@@ -14,6 +14,10 @@ Adds `bedrock.After`. Additive and backwards compatible: a service that never ca
 
 - **`Options.AfterLimit`** — how many requests' `After` tasks may run at once. Zero means `DefaultAfterLimit` (100). No effect on a service that never calls `After`.
 
+### Fixed
+
+- **`JSON(http.StatusNoContent, nil)` no longer errors.** `JSONResponse.Write` encoded `Data` whatever the status, so a 204 got a `null` body that net/http refuses; `serveRoute` then called `http.Error` after the 204 was already sent, and net/http logged a superfluous `WriteHeader` on every such response. Clients always saw a clean 204, which is why it went unnoticed. For a status that cannot carry a body (1xx, 204, 304), `Write` now sends the headers and status only: no body, no `Content-Type`, and any `Data` is ignored. Go 1.27's `httptest.ResponseRecorder` refuses the body too, so before this fix, handler tests that wrote one of these responses failed there.
+
 ### Unchanged
 
 `Route`, `Handler`, `Response`, middleware, and every existing `Options` field. The exported API only gains `After`, `ErrAfterUnavailable`, `DefaultAfterLimit` and `Options.AfterLimit`. Per request, the handler now receives a child of the request context carrying an empty task list; it has the same values, deadline and cancellation as before.
