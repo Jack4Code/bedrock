@@ -1,6 +1,6 @@
 module github.com/Jack4Code/bedrock/grpc
 
-go 1.25.5
+go 1.27.3
 
 // Builds this module against the parent in the working tree rather than the
 // published version, so a change spanning both is testable before either is

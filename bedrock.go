@@ -781,15 +781,35 @@ type JSONResponse struct {
 	Headers    http.Header
 }
 
+// Write sends the headers, the status and Data as JSON. For a status that
+// cannot carry a body (1xx, 204, 304) it sends the headers and status only and
+// ignores Data: encoding it, even a nil Data's `null`, makes net/http refuse
+// the write, and serveRoute would answer a successful response with a 500.
 func (r JSONResponse) Write(ctx context.Context, w http.ResponseWriter) error {
 	for key, values := range r.Headers {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
+	if !bodyAllowedForStatus(r.StatusCode) {
+		w.WriteHeader(r.StatusCode)
+		return nil
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(r.StatusCode)
 	return json.NewEncoder(w).Encode(r.Data)
+}
+
+// bodyAllowedForStatus mirrors the unexported check of the same name in
+// net/http.
+func bodyAllowedForStatus(status int) bool {
+	switch {
+	case status >= 100 && status <= 199:
+		return false
+	case status == http.StatusNoContent, status == http.StatusNotModified:
+		return false
+	}
+	return true
 }
 
 func JSON(statusCode int, data any) Response {
