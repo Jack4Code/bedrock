@@ -13,3 +13,6 @@
 # repo relies on for cross-module builds. See RELEASING.md.
 go.work
 go.work.sum
+
+# Per-developer Claude Code instructions.
+CLAUDE.md
