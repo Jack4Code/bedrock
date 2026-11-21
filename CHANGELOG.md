@@ -16,6 +16,8 @@ Adds `bedrock.After`. Additive and backwards compatible: a service that never ca
 
 ### Fixed
 
+- **A panicking scheduled job no longer crashes the process.** robfig/cron v3 does not recover panics in jobs (v2 did), so a `Job.Handler` that panicked took down the whole service, HTTP routes included. The panic is now recovered and logged at `Error` through `Options.Logger` with its stack trace, and the job keeps its schedule. If the job sets `OnError`, it receives the panic as an error wrapping the new **`ErrJobPanicked`** (check with `errors.Is`); without `OnError`, the panic is logged once, not twice. A panic inside `OnError` is recovered and logged too. This matches how `After` already treats panicking tasks.
+
 - **`JSON(http.StatusNoContent, nil)` no longer errors.** `JSONResponse.Write` encoded `Data` whatever the status, so a 204 got a `null` body that net/http refuses; `serveRoute` then called `http.Error` after the 204 was already sent, and net/http logged a superfluous `WriteHeader` on every such response. Clients always saw a clean 204, which is why it went unnoticed. For a status that cannot carry a body (1xx, 204, 304), `Write` now sends the headers and status only: no body, no `Content-Type`, and any `Data` is ignored. Go 1.27's `httptest.ResponseRecorder` refuses the body too, so before this fix, handler tests that wrote one of these responses failed there.
 
 ### Changed
