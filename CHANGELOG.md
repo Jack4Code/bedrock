@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+Raises the minimum Go version to 1.27.4. No API or behaviour change.
+
+### Changed
+
+- **Requires Go 1.27.4.** Both modules' `go` directive moves from 1.27.3 to 1.27.4, so a service upgrading to this release must be on Go 1.27.4 or later. The `grpc` module's change ships with its next tag; `grpc/v0.1.0` still declares 1.25.5.
+
+### Module versions
+
+| module | tag | requires |
+|---|---|---|
+| `github.com/Jack4Code/bedrock` | next minor | — |
+| `github.com/Jack4Code/bedrock/grpc` | `grpc/v0.1.0` (unchanged) | `bedrock >= v0.5.0` |
+
+---
+
 ## v0.10.0
 
 A panicking scheduled job no longer takes the process down. The exported API only gains `ErrJobPanicked`.
