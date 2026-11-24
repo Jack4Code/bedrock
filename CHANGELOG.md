@@ -1,6 +1,44 @@
 # Changelog
 
-## Unreleased
+## v0.10.0
+
+A panicking scheduled job no longer takes the process down. The exported API only gains `ErrJobPanicked`.
+
+### Fixed
+
+- **A panicking scheduled job no longer crashes the process.** robfig/cron v3 does not recover panics in jobs (v2 did), so a `Job.Handler` that panicked took down the whole service, HTTP routes included. The panic is now recovered and logged at `Error` through `Options.Logger` with its stack trace, and the job keeps its schedule. If the job sets `OnError`, it receives the panic as an error wrapping the new **`ErrJobPanicked`** (check with `errors.Is`); without `OnError`, the panic is logged once, not twice. A panic inside `OnError` is recovered and logged too. This matches how `After` already treats panicking tasks.
+
+### Module versions
+
+| module | tag | requires |
+|---|---|---|
+| `github.com/Jack4Code/bedrock` | `v0.10.0` | — |
+| `github.com/Jack4Code/bedrock/grpc` | `grpc/v0.1.0` (unchanged) | `bedrock >= v0.5.0` |
+
+---
+
+## v0.9.0
+
+Raises the minimum Go version to 1.27.3, and stops `JSON` from trying to write a body for a status that cannot carry one. No API change.
+
+### Changed
+
+- **Requires Go 1.27.3.** Both modules' `go` directive moves from 1.25.5 to 1.27.3, so a service upgrading to this release must be on Go 1.27.3 or later. The `grpc` module's change ships with its next tag; `grpc/v0.1.0` still declares 1.25.5.
+
+### Fixed
+
+- **`JSON(http.StatusNoContent, nil)` no longer errors.** `JSONResponse.Write` encoded `Data` whatever the status, so a 204 got a `null` body that net/http refuses; `serveRoute` then called `http.Error` after the 204 was already sent, and net/http logged a superfluous `WriteHeader` on every such response. Clients always saw a clean 204, which is why it went unnoticed. For a status that cannot carry a body (1xx, 204, 304), `Write` now sends the headers and status only: no body, no `Content-Type`, and any `Data` is ignored. Go 1.27's `httptest.ResponseRecorder` refuses the body too, so before this fix, handler tests that wrote one of these responses failed there.
+
+### Module versions
+
+| module | tag | requires |
+|---|---|---|
+| `github.com/Jack4Code/bedrock` | `v0.9.0` | — |
+| `github.com/Jack4Code/bedrock/grpc` | `grpc/v0.1.0` (unchanged) | `bedrock >= v0.5.0` |
+
+---
+
+## v0.8.0
 
 Adds `bedrock.After`. Additive and backwards compatible: a service that never calls it behaves exactly as on v0.7.0, and there is no upgrade checklist.
 
@@ -14,16 +52,6 @@ Adds `bedrock.After`. Additive and backwards compatible: a service that never ca
 
 - **`Options.AfterLimit`** — how many requests' `After` tasks may run at once. Zero means `DefaultAfterLimit` (100). No effect on a service that never calls `After`.
 
-### Fixed
-
-- **A panicking scheduled job no longer crashes the process.** robfig/cron v3 does not recover panics in jobs (v2 did), so a `Job.Handler` that panicked took down the whole service, HTTP routes included. The panic is now recovered and logged at `Error` through `Options.Logger` with its stack trace, and the job keeps its schedule. If the job sets `OnError`, it receives the panic as an error wrapping the new **`ErrJobPanicked`** (check with `errors.Is`); without `OnError`, the panic is logged once, not twice. A panic inside `OnError` is recovered and logged too. This matches how `After` already treats panicking tasks.
-
-- **`JSON(http.StatusNoContent, nil)` no longer errors.** `JSONResponse.Write` encoded `Data` whatever the status, so a 204 got a `null` body that net/http refuses; `serveRoute` then called `http.Error` after the 204 was already sent, and net/http logged a superfluous `WriteHeader` on every such response. Clients always saw a clean 204, which is why it went unnoticed. For a status that cannot carry a body (1xx, 204, 304), `Write` now sends the headers and status only: no body, no `Content-Type`, and any `Data` is ignored. Go 1.27's `httptest.ResponseRecorder` refuses the body too, so before this fix, handler tests that wrote one of these responses failed there.
-
-### Changed
-
-- **Requires Go 1.27.3.** Both modules' `go` directive moves from 1.25.5 to 1.27.3, so a service upgrading to this release must be on Go 1.27.3 or later. The `grpc` module's change ships with its next tag; `grpc/v0.1.0` still declares 1.25.5.
-
 ### Unchanged
 
 `Route`, `Handler`, `Response`, middleware, and every existing `Options` field. The exported API only gains `After`, `ErrAfterUnavailable`, `DefaultAfterLimit` and `Options.AfterLimit`. Per request, the handler now receives a child of the request context carrying an empty task list; it has the same values, deadline and cancellation as before.
@@ -32,7 +60,7 @@ Adds `bedrock.After`. Additive and backwards compatible: a service that never ca
 
 | module | tag | requires |
 |---|---|---|
-| `github.com/Jack4Code/bedrock` | next minor | — |
+| `github.com/Jack4Code/bedrock` | `v0.8.0` | — |
 | `github.com/Jack4Code/bedrock/grpc` | `grpc/v0.1.0` (unchanged) | `bedrock >= v0.5.0` |
 
 ---
